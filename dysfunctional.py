@@ -3,7 +3,7 @@ from vapoursynth import core
 
 def STGrain(clip, **kwargs) -> vs.VideoNode:
     """
-    STPreso is being fed a GRAY16 clip, don't expect anything on [1,2].
+    STPresso is being fed a GRAY16 clip, don't expect anything on [1,2].
     TODO: Handle Y/Cb/Cr
     """
     from fvsfunc import Depth
