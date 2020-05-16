@@ -3,6 +3,7 @@ from vapoursynth import core
 
 def STGrain(clip, **kwargs) -> vs.VideoNode:
     """
+    STPresoos is being fed a GRAY16 clip, don't expect anything on [1,2].
     TODO: Handle Y/Cb/Cr
     """
     from fvsfunc import Depth
@@ -17,5 +18,5 @@ def STGrain(clip, **kwargs) -> vs.VideoNode:
     dif = core.std.MakeDiff(lma, dns)
     rgn = STPresso(dif, **kwargs)
     mrg = core.std.MergeDiff(dns, rgn)
-    shf =  core.std.ShufflePlanes([mrg, b16], [0,1,2], vs.YUV)
+    shf = core.std.ShufflePlanes([mrg, b16], [0,1,2], vs.YUV)
     return Depth(shf, clip.format.bits_per_sample)
