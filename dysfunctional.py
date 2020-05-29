@@ -18,7 +18,7 @@ def STGrain(clip, knl=1, **kwargs) -> vs.VideoNode:
     from havsfunc import STPresso
 
     if clip.format.color_family == vs.RGB:
-        clip = core.resize.Point(clip, format=vs.YUV420P16, matrix_s='709')
+        clip = core.resize.Point(clip, format=vs.YUV444P16, matrix_s='709')
 
     b16 = Depth(clip, 16)
     lma = core.std.ShufflePlanes(b16, 0, vs.GRAY)
