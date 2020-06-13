@@ -24,7 +24,7 @@ def STGraino(clip, pre=None, str=1, show_diff=False, **kwargs) -> vs.VideoNode:
     elif pre == 'cdg':
         from cooldegrain import CoolDegrain
         denoise = CoolDegrain(lma, tr=1, thsad=str)
-    elif pre is 'rgsf' or 'rgvs':
+    elif pre == 'rgsf' or 'rgvs':
         from rgvs import RemoveGrain
         try:
             denoise = RemoveGrain(lma, mode=str)
