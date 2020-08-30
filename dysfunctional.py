@@ -55,6 +55,7 @@ def RGBtoYUV(clip):
     else:
         return clip
 
+
 def FDOG(clip: vs.VideoNode, retinex=True, x=2, y=2, bits=16, opencl=False) -> vs.VideoNode:
     from vsutil import depth, get_depth, get_y
     def __FDOG(clip: vs.VideoNode) -> vs.VideoNode:
@@ -69,7 +70,7 @@ def FDOG(clip: vs.VideoNode, retinex=True, x=2, y=2, bits=16, opencl=False) -> v
         else:
             return expr
 
-    def __retinex_fdog(clip: vs.VideoNode, sigma=1.5, sigma_rtx=[50, 200, 350], opencl=False) -> vs.VideoNode:
+    def __retinex_fdog(clip: vs.VideoNode, sigma=1.5, sigma_rtx=[50, 200, 350], opencl=opencl) -> vs.VideoNode:
         tcanny = core.tcanny.TCannyCL if opencl else core.tcanny.TCanny
         luma = get_y(clip)
         fdog = __FDOG(luma)
