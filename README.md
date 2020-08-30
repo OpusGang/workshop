@@ -1,6 +1,6 @@
 # toolbox
 
-Stuff I've made that might be useful to others, just STGraino for now.
+Stuff that doesn't really fit anywhere else
 
 ### Requirements
 * [vsutil](https://github.com/Irrational-Encoding-Wizardry/vsutil)
