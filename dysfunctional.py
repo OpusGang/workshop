@@ -56,26 +56,25 @@ def RGBtoYUV(clip):
         return clip
 
 
-def FDOG(clip: vs.VideoNode, retinex=True, x=2, y=2, bits=16, opencl=False) -> vs.VideoNode:
+def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=False) -> vs.VideoNode:
     from vsutil import depth, get_depth, get_y
+
+    if isinstance(div, int): div=[div, div]
     
-    if retinex is True: bits=16
-
     def __FDOG(clip: vs.VideoNode) -> vs.VideoNode:    
-        lma = core.std.ShufflePlanes(depth(clip, bits), 0, vs.GRAY)
-        gx = core.std.Convolution(lma, [1, 1, 0, -1, -1, 2, 2, 0, -2, -2, 3, 3, 0, -3, -3, 2, 2, 0, -2, -2, 1, 1, 0, -1, -1], divisor=x, saturate=False)
-        gy = core.std.Convolution(lma, [-1, -2, -3, -2, -1, -1, -2, -3, -2, -1, 0, 0, 0, 0, 0, 1, 2, 3, 2, 1, 1, 2, 3, 2, 1], divisor=y, saturate=False)
-        expr = core.std.Expr([gx, gy], 'x dup * y dup * + sqrt')
+        lma = depth(get_y(clip), bits)
+        gx = core.std.Convolution(lma, [1, 1, 0, -1, -1, 2, 2, 0, -2, -2, 3, 3, 0, -3, -3, 2, 2, 0, -2, -2, 1, 1, 0, -1, -1], divisor=div[0], saturate=False)
+        gy = core.std.Convolution(lma, [-1, -2, -3, -2, -1, -1, -2, -3, -2, -1, 0, 0, 0, 0, 0, 1, 2, 3, 2, 1, 1, 2, 3, 2, 1], divisor=div[1], saturate=False)
+        return core.std.Expr([gx, gy], 'x dup * y dup * + sqrt')
 
-        if bits > 16: return depth(expr, 16)
-        else: return expr
 
-    def __retinex_fdog(clip: vs.VideoNode, sigma=1.5, sigma_rtx=[50, 200, 350], opencl=opencl) -> vs.VideoNode:
+    def __retinex_fdog(clip: vs.VideoNode, sigma=sigma, sigma_rtx=[50, 200, 350], opencl=opencl) -> vs.VideoNode:
         tcanny = core.tcanny.TCannyCL if opencl else core.tcanny.TCanny
         luma = get_y(clip)
+        luma = depth(luma, bits)
         fdog = __FDOG(luma)
-        max_value = 1 if clip.format.sample_type == vs.FLOAT else (1 << get_depth(clip)) - 1
-        ret = core.retinex.MSRCP(luma, sigma=sigma_rtx, upper_thr=0.005)
+        max_value = 1 if luma.format.sample_type == vs.FLOAT else (1 << get_depth(luma)) - 1
+        ret = depth(core.retinex.MSRCP(depth(luma, 16), sigma=sigma_rtx, upper_thr=0.005), bits)
         tcanny = tcanny(ret, mode=1, sigma=sigma).std.Minimum(coordinates=[1, 0, 1, 0, 0, 1, 0, 1])
         return core.std.Expr([fdog, tcanny], f'x y + {max_value} min')
 
