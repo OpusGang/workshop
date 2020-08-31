@@ -67,7 +67,6 @@ def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=Fal
         gy = core.std.Convolution(lma, [-1, -2, -3, -2, -1, -1, -2, -3, -2, -1, 0, 0, 0, 0, 0, 1, 2, 3, 2, 1, 1, 2, 3, 2, 1], divisor=div[1], saturate=False)
         return core.std.Expr([gx, gy], 'x dup * y dup * + sqrt')
 
-
     def __retinex_fdog(clip: vs.VideoNode, sigma=sigma, sigma_rtx=[50, 200, 350], opencl=opencl) -> vs.VideoNode:
         tcanny = core.tcanny.TCannyCL if opencl else core.tcanny.TCanny
         luma = get_y(clip)
@@ -78,5 +77,5 @@ def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=Fal
         tcanny = tcanny(ret, mode=1, sigma=sigma).std.Minimum(coordinates=[1, 0, 1, 0, 0, 1, 0, 1])
         return core.std.Expr([fdog, tcanny], f'x y + {max_value} min')
 
-    if retinex is True: return __retinex_fdog(clip)
-    else: return __FDOG(clip)
+    if retinex is True: return depth(__retinex_fdog(clip), clip.format.bits_per_sample, dither_type='none')
+    else: return depth(__FDOG(clip), clip.format.bits_per_sample, dither_type='none')
