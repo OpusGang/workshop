@@ -79,3 +79,145 @@ def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=Fal
 
     if retinex is True: return depth(__retinex_fdog(clip), clip.format.bits_per_sample, dither_type='none')
     else: return depth(__FDOG(clip), clip.format.bits_per_sample, dither_type='none')
+
+
+def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blur=999):
+    from vsutil import *
+    clip = depth(clip, 16)
+    radius = max([top, bottom, left, right]) * 2
+    cf = clip.cf.ContinuityFixer(top=top, bottom=bottom, left=left, right=right, radius=radius)
+    refv = []
+    fltv = []
+
+    refh = []
+    flth = []
+
+    if top:
+        refh.append(clip.std.Crop(bottom=clip.height - top))
+        flth.append(cf.std.Crop(bottom=clip.height - top))
+        
+    if bottom:
+        refh.append(clip.std.Crop(top=clip.height - bottom - 1))
+        flth.append(cf.std.Crop(top=clip.height - bottom - 1))
+         
+    if left:
+        refv.append(clip.std.Crop(right=clip.width - left))
+        fltv.append(cf.std.Crop(right=clip.width - left))
+
+    if right:
+        refv.append(clip.std.Crop(left=clip.width - right - 1))
+        fltv.append(cf.std.Crop(left=clip.width - right - 1))
+
+    bv = max(clip.width / blur, 8)
+    bh = max(clip.height / blur, 8)
+
+    if left or right:
+        refv = core.std.StackHorizontal(refv)
+        fltv = core.std.StackHorizontal(fltv)
+        for x in [refv, fltv]:
+            x = x.resize.Point(refv.width, bv).resize.Point(refv.width, refv.height)
+        outv = core.std.Expr([refv, fltv], [f"x y - {thr} > x {thr} + x y - -{thr} < x {thr} - y ? ?"])
+
+    if top or bottom:
+        refh = core.std.StackVertical(refh)
+        flth = core.std.StackVertical(flth)
+        for x in [refh, flth]:
+            x = x.resize.Point(bh, refh.height).resize.Point(refh.width, refh.height)
+        outh = core.std.Expr([refh, flth], [f"x y - {thr} > x {thr} + x y - -{thr} < x {thr} - y ? ?"])
+
+
+    if top and bottom:
+        clip = core.std.StackVertical([outh.std.Crop(bottom=bottom + 1), clip.std.Crop(top=top, bottom=bottom + 1), outh.std.Crop(top=top)])
+    elif top:
+        clip = core.std.StackVertical([outh, clip.std.Crop(top=top)])
+    elif bottom:
+        clip = core.std.StackVertical([clip.std.Crop(bottom=bottom + 1), outh])
+    if left and right:
+        clip = core.std.StackHorizontal([outv.std.Crop(right=right + 1), clip.std.Crop(left=left, right=right + 1), outv.std.Crop(left=left)])
+    elif left:
+        clip = core.std.StackHorizontal([outv, clip.std.Crop(left=left)])
+    elif right:
+        clip = core.std.StackHorizontal([clip.std.Crop(right=right + 1), outv])
+
+    return clip
+
+def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999, scale_thr=True, planes=None):
+    from vsutil import *
+    import math
+    if scale_thr:
+        thr = scale_value(thr, 8, 16)
+    if planes is None:
+        planes = [x for x in range(clip.format.num_planes)]
+
+    sw, sh = clip.format.subsampling_w, clip.format.subsampling_h
+
+    if sh == 1:
+        if not isinstance(top, list):
+            top = [top] + 2 * [math.ceil(top / 2)]
+        elif len(top) == 2:
+            top.append(top[1])
+        if not isinstance(bottom, list):
+            bottom = [bottom] + 2 * [math.ceil(bottom / 2)]
+        elif len(bottom) == 2:
+            bottom.append(bottom[1])
+    else:
+        if not isinstance(top, list):
+            top = 3 * [top]
+        elif len(top) == 2:
+            top.append(top[1])
+        if not isinstance(bottom, list):
+            bottom = 3 * [bottom]
+        elif len(bottom) == 2:
+            bottom.append(bottom[1])
+    if sw == 1:
+        if not isinstance(left, list):
+            left = [left] + 2 * [math.ceil(left / 2)]
+        elif len(left) == 2:
+            left.append(left[1])
+        if not isinstance(right, list):
+            right = [right] + 2 * [math.ceil(right / 2)]
+        elif len(right) == 2:
+            right.append(right[1])
+    else:
+        if not isinstance(left, list):
+            left = 3 * [left]
+        elif len(left) == 2:
+            left.append(left[1])
+        if not isinstance(right, list):
+            right = 3 * [right]
+        elif len(right) == 2:
+            right.append(right[1])
+
+    if not isinstance(radius, list):
+        radius = 3 * [radius]
+    elif len(radius) == 2:
+        radius.append(radius[1])
+    if not isinstance(thr, list):
+        thr = 3 * [thr]
+    elif len(thr) == 2:
+        thr.append(thr[1])
+    if not isinstance(blur, list):
+        blur = 3 * [blur]
+    elif len(blur) == 2:
+        blur.append(blur[1])
+    if not isinstance(blur, list):
+        blur = 3 * [x]
+    elif len(blur) == 2:
+        blur.append(x[1])
+    if not isinstance(planes, list):
+        planes = [planes]
+
+    if not clip.format.color_family == vs.GRAY:
+        c = split(clip)
+    else:
+        c = [clip]
+    i = 0
+    for x in c:
+        if i in planes:
+            c[i] = bbcfcalc(c[i], top[i], bottom[i], left[i], right[i], radius[i], thr[i], blur[i])
+        i += 1
+
+    if not clip.format.color_family == vs.GRAY:
+        return join(c)
+    else:
+        return c[0]
