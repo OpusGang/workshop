@@ -82,7 +82,7 @@ def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=Fal
 
 
 def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blur=999):
-    from vsutil import *
+    from vsutil import depth
     clip = depth(clip, 16)
     radius = max([top, bottom, left, right]) * 2
     cf = clip.cf.ContinuityFixer(top=top, bottom=bottom, left=left, right=right, radius=radius)
@@ -142,7 +142,7 @@ def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blu
     return clip
 
 def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999, scale_thr=True, planes=None):
-    from vsutil import *
+    from vsutil import scale_value, split, join
     import math
     if scale_thr:
         thr = scale_value(thr, 8, 16)
