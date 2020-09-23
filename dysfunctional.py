@@ -221,3 +221,63 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
         return join(c)
     else:
         return c[0]
+
+
+def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom=0, top=0, ar=16 / 9):
+    """
+    ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
+    only works with 420 atm since 444 would probably add krigbilateral to the mix
+    """
+    from vsutil import depth, split, join
+    import math
+    import urllib.request
+    shader = urllib.request.urlopen("https://gist.githubusercontent.com/igv/36508af3ffc84410fe39761d6969be10/raw/ac09db2c0664150863e85d5a4f9f0106b6443a12/SSimDownscaler.glsl")
+    shader = shader.read()
+    if preset == width == height == None:
+        preset = 1080
+
+    if preset:
+        if clip.width / clip.height > ar:
+            return shaderdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom)
+        else:
+            return shaderdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom)
+
+    if (width is None) and (height is None):
+        width = clip.width
+        height = clip.height
+        rh = rw = 1
+    elif width is None:
+        rh = rw = height / (clip.height - top - bottom) 
+    elif height is None:
+        rh = rw = width / (clip.width - left - right)
+    else:
+        rh = height / clip.height
+        rw = width / clip.width
+
+    w = round(((clip.width - left - right) * rw) / 2) * 2
+    h = round(((clip.height - top - bottom) * rh) / 2) * 2
+
+    ind = clip.format.bits_per_sample
+
+    clip = depth(clip, 16)
+
+    shift = .25 - .25 * clip.width / w
+
+    y, u, v = split(clip)
+
+    if left or right or top or bottom:
+        oc = [u.width, u.height]
+        y = y.std.Crop(left, right, top, bottom)
+        c = [math.ceil(left / 2), math.ceil(right / 2), math.ceil(top / 2), math.ceil(bottom / 2)]
+        u = u.std.Crop(c[0], c[1], c[2], c[3])
+        v = v.std.Crop(c[0], c[1], c[2], c[3])
+        clip = y.resize.Point(format=vs.YUV444P16)
+
+    y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell", linearize=0, sigmoidize=0)
+
+    u = u.resize.Spline36(w / 2, h / 2, src_left=shift - left)
+    v = v.resize.Spline36(w / 2, h / 2, src_left=shift - left)
+
+    return depth(join([y, u, v]), ind)
+
+
