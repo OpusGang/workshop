@@ -238,9 +238,9 @@ def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom
 
     if preset:
         if clip.width / clip.height > ar:
-            return shaderdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom)
+            return ssimdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom)
         else:
-            return shaderdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom)
+            return ssimdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom)
 
     if (width is None) and (height is None):
         width = clip.width
