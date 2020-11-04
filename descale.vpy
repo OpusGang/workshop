@@ -6,7 +6,7 @@ core = vs.core
 src = core.ffms2.Source(r'00000.m2ts')
 b32 = vsutil.depth(src, 32)
 
-height = 844
+height = 810
 width = vsutil.get_w(height)
 depth = src.format.bits_per_sample
 
@@ -25,13 +25,13 @@ descale_e = core.descale.Debicubic(y, width, height, b=0, c=1/2).resize.Bicubic(
 # Spline36
 descale_f = core.descale.Despline36(y, width, height).resize.Spline36(src.width, src.height)
 
-src = [descale_a, descale_b, descale_c, descale_d, descale_e, descale_f]
-src[0], src[1], src[2], src[3], src[4], src[5] = [vsutil.depth(core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV), depth, dither_type='none') for x in src[0:]]
+des = [descale_a, descale_b, descale_c, descale_d, descale_e, descale_f]
+des[0], des[1], des[2], des[3], des[4], des[5] = [vsutil.depth(core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV), depth, dither_type='none') for x in des[0:]]
 
-vsutil.depth(b32, depth).set_output(1)
-vsutil.depth(src[0], depth).set_output(2)
-vsutil.depth(src[1], depth).set_output(3)
-vsutil.depth(src[2], depth).set_output(4)
-vsutil.depth(src[3], depth).set_output(5)
-vsutil.depth(src[4], depth).set_output(6)
-vsutil.depth(src[5], depth).set_output(7)
+src.set_output(1)
+des[0].set_output(2)
+des[1].set_output(3)
+des[2].set_output(4)
+des[3].set_output(5)
+des[4].set_output(6)
+des[5].set_output(7)
