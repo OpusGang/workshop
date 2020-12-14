@@ -26,7 +26,7 @@ descale_e = core.descale.Debicubic(y, width, height, b=0, c=1/2).resize.Bicubic(
 descale_f = core.descale.Despline36(y, width, height).resize.Spline36(src.width, src.height)
 
 des = [descale_a, descale_b, descale_c, descale_d, descale_e, descale_f]
-des[0], des[1], des[2], des[3], des[4], des[5] = [vsutil.depth(core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV), depth, dither_type='none') for x in des[0:]]
+des[0], des[1], des[2], des[3], des[4], des[5] = [core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV) for x in des[0:]]
 
 src.set_output(1)
 des[0].set_output(2)
