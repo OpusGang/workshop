@@ -25,13 +25,13 @@ descale_e = core.descale.Debicubic(y, width, height, b=0, c=1/2).resize.Bicubic(
 # Spline36
 descale_f = core.descale.Despline36(y, width, height).resize.Spline36(src.width, src.height)
 
-des = [descale_a, descale_b, descale_c, descale_d, descale_e, descale_f]
-des[0], des[1], des[2], des[3], des[4], des[5] = [core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV) for x in des[0:]]
+out = [b32, descale_a, descale_b, descale_c, descale_d, descale_e, descale_f]
+out[0], out[1], out[2], out[3], out[4], out[5], out[6] = [core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV) for x in out[0:]]
 
-src.set_output(1)
-des[0].set_output(2)
-des[1].set_output(3)
-des[2].set_output(4)
-des[3].set_output(5)
-des[4].set_output(6)
-des[5].set_output(7)
+out[0].set_output(0)
+out[1].set_output(1)
+out[2].set_output(2)
+out[3].set_output(3)
+out[4].set_output(4)
+out[5].set_output(5)
+out[6].set_output(6)
