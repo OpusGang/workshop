@@ -271,12 +271,22 @@ def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom
         c = [math.ceil(left / 2), math.ceil(right / 2), math.ceil(top / 2), math.ceil(bottom / 2)]
         u = u.std.Crop(c[0], c[1], c[2], c[3])
         v = v.std.Crop(c[0], c[1], c[2], c[3])
+        c = 4 * [0]
+        if left % 2 == 1:
+            c[0] = .5
+        if right % 2 == 1:
+            c[1] = .5
+        if top % 2 == 1:
+            c[2] = .5
+        if bottom % 2 == 1:
+            c[3] = .5
         clip = y.resize.Point(format=vs.YUV444P16)
 
-    y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell", linearize=0, sigmoidize=0)
+    y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell") # pretty sure these don't need to be set: , linearize=0, sigmoidize=0)
 
-    u = u.resize.Spline36(w / 2, h / 2, src_left=shift - left)
-    v = v.resize.Spline36(w / 2, h / 2, src_left=shift - left)
+    # I hope the shifts are correctly set
+    u = u.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
+    v = v.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind)
 
