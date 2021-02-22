@@ -281,6 +281,8 @@ def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom
         if bottom % 2 == 1:
             c[3] = .5
         clip = y.resize.Point(format=vs.YUV444P16)
+    else:
+        c = 4 * [0]
 
     y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell") # pretty sure these don't need to be set: , linearize=0, sigmoidize=0)
 
