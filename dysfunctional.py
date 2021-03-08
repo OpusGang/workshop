@@ -288,7 +288,7 @@ def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom
 
     # I hope the shifts are correctly set
     u = u.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
-    v = v.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
+    v = v.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=v.width - c[0] - c[1], src_top=c[2], src_height=v.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind)
 
