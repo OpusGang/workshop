@@ -52,12 +52,14 @@ def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 
     average = core.std.Merge(grain, core.misc.AverageFrames(grain, weights=weights), weight=[temporal_average / 100])
     
     diff = core.std.MakeDiff(blank, average)
-    overlay = core.std.Expr([clip, diff], ["x y +"])
+    merge = core.std.Expr([clip, diff], ["x y +"])
 
-    mask = core.adg.Mask(core.std.PlaneStats(clip))
-    if invert is True: mask = core.std.Invert(mask)
+    if luma_scaling > 0:
+        mask = core.adg.Mask(core.std.PlaneStats(clip))
 
-    merge = core.std.MaskedMerge(clip, overlay, mask)
+        if invert is True: mask = core.std.Invert(mask)
+        merge = core.std.MaskedMerge(clip, merge, mask)
+
     return depth(merge, bits, dither_type='none')
 
 
