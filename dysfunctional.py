@@ -40,15 +40,25 @@ def STGraino(clip: vs.VideoNode, prefilter: vs.VideoNode, planes: list = [0,1,2]
 # Control grain averaging with weights
 # Higher values = weaker grain and less entropy
 def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 7, temporal_average: int = 100, luma_scaling: float = 12.0, invert: bool = False) -> vs.VideoNode:
+    from vsutil import depth
+
     if isinstance(strength, int): strength=[strength, strength]
 
-    grain = core.grain.Add(clip, var=strength[0], uvar=strength[1], seed=444)
+    bits = clip.format.bits_per_sample
+    if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
+
+    blank = core.std.BlankClip(clip, color=[128, 128, 128])
+    grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     average = core.std.Merge(grain, core.misc.AverageFrames(grain, weights=weights), weight=[temporal_average / 100])
+    
+    diff = core.std.MakeDiff(blank, average)
+    overlay = core.std.Expr([clip, diff], ["x y +"])
 
     mask = core.adg.Mask(core.std.PlaneStats(clip))
     if invert is True: mask = core.std.Invert(mask)
 
-    return core.std.MaskedMerge(clip, average, mask)
+    merge = core.std.MaskedMerge(clip, overlay, mask)
+    return depth(merge, bits, dither_type='none')
 
 
 def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=False) -> vs.VideoNode:
