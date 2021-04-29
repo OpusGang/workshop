@@ -218,16 +218,26 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
         return c[0]
 
 
-def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom=0, top=0, ar=16 / 9):
+def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom=0, top=0, ar=16 / 9, shader_path=None, shader_str=None):
     """
     ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
     only works with 420 atm since 444 would probably add krigbilateral to the mix
     """
     from vsutil import depth, split, join
     import math
-    import urllib.request
-    shader = urllib.request.urlopen("https://gist.githubusercontent.com/igv/36508af3ffc84410fe39761d6969be10/raw/ac09db2c0664150863e85d5a4f9f0106b6443a12/SSimDownscaler.glsl")
-    shader = shader.read()
+
+    if not shader_str:
+        if shader_path:
+            with open(shader_path) as f:
+                shader = f.read()
+        else:
+            import urllib.request
+
+            shader = urllib.request.urlopen("https://gist.githubusercontent.com/igv/36508af3ffc84410fe39761d6969be10/raw/ac09db2c0664150863e85d5a4f9f0106b6443a12/SSimDownscaler.glsl")
+            shader = shader.read()
+    else:
+        shader = shader_str
+
     if preset == width == height == None:
         preset = 1080
 
