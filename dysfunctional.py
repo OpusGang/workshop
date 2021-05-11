@@ -1,7 +1,7 @@
 import vapoursynth as vs
 core = vs.core
 
-def STGraino(clip: vs.VideoNode, prefilter: vs.VideoNode, planes: list = [0,1,2], show_diff: bool = False, **kwargs) -> vs.VideoNode:
+def STGraino(clip: vs.VideoNode, prefilter: callable = None, planes: list = [0,1,2], show_diff: bool = False, **kwargs) -> vs.VideoNode:
     """
     STPresso: https://github.com/HomeOfVapourSynthEvolution/havsfunc/blob/master/havsfunc.py#L3535
     STPresso args can be parsed directly into this wrapper, i.e;
@@ -11,6 +11,8 @@ def STGraino(clip: vs.VideoNode, prefilter: vs.VideoNode, planes: list = [0,1,2]
     """
     from vsutil import split, join, depth
     from havsfunc import STPresso
+
+    if prefilter is None: prefilter = lambda x: core.bilateral.Bilateral(x)
 
     planar = split(clip)
 
@@ -47,7 +49,7 @@ def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 
     bits = clip.format.bits_per_sample
     if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
 
-    blank = core.std.BlankClip(clip, color=[128, 128, 128])
+    blank = core.std.BlankClip(clip, color=[128]*3)
     grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     average = core.std.Merge(grain, core.misc.AverageFrames(grain, weights=weights), weight=[temporal_average / 100])
     
@@ -61,6 +63,54 @@ def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 
         merge = core.std.MaskedMerge(clip, merge, mask)
 
     return depth(merge, bits, dither_type='none')
+
+
+def horribleDNR(clip: vs.VideoNode, prefilter: callable = None, postfilter: callable = None) -> vs.VideoNode:
+    from kagefunc import retinex_edgemask
+    from havsfunc import SMDegrain
+
+    def __detailEnhance(clip: vs.VideoNode) -> vs.VideoNode:
+        import numpy as np
+        import cv2
+        import muvsfunc_numpy as mufnp    
+        # https://github.com/WolframRhodium/muvsfunc/wiki/OpenCV-Python-for-VapourSynth#detail-enhancement-on-rgb-using-domain-transform
+        toRGB = core.resize.Point(clip, format=vs.RGB24, matrix_in_s='709')
+        enhance = lambda img: cv2.detailEnhance(img)
+        output = mufnp.numpy_process(toRGB, enhance, input_per_plane=False, output_per_plane=False)
+        return core.resize.Point(output, format=vs.YUV420P16, matrix_s='709')
+    
+    if prefilter is None: prefilter = lambda x: core.bilateral.Bilateral(x, sigmaS=0.8, sigmaR=0.05)
+    if postfilter is None: postfilter = lambda x: core.misc.AverageFrames(x, [1]*3)
+
+    protEdges = retinex_edgemask(clip, sigma=1).std.Minimum().std.Maximum().std.Maximum()
+    removeNoise = prefilter(clip)
+    maskEdges = core.std.MaskedMerge(removeNoise, clip, protEdges)
+
+    storeNoise = core.std.MakeDiff(clip, maskEdges, planes=[0,1,2])
+    avgNoise = core.std.Merge(storeNoise, postfilter(storeNoise), weight=[1])
+    sharpNoise = core.std.MaskedMerge(avgNoise, __detailEnhance(avgNoise), maskEdges)
+    # contrasharp expr stolen from havsfunc
+    neutral = 1 << (clip.format.bits_per_sample - 1)
+    limitSharp = core.std.Expr([clip, sharpNoise], expr=[f'x {neutral} - abs y {neutral} - abs < x y ?'])
+
+    return core.std.MergeDiff(limitSharp, maskEdges)
+
+
+def bm3dGPU(clip: vs.VideoNode, sigma: int = 5, ref: callable = None, radius: int = 1, fast: bool = False) -> vs.VideoNode:
+    from havsfunc import SMDegrain
+
+    if ref is None: ref = lambda x: SMDegrain(x, tr=3, thSAD=100, thSADC=100, RefineMotion=True)
+
+    opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709'), sample=1)
+    reference = ref(clip)
+    reference = core.bm3d.RGB2OPP(core.resize.Point(reference, format=vs.RGBS, matrix_in_s='709'), sample=1)
+    
+    denoise = core.bm3dcuda.BM3D(opp32, reference, sigma=[sigma, 0, 0], radius=radius, fast=fast, block_step=[5]*4, bm_range=[8]*4, ps_num=2, ps_range=1)
+    denoise = core.bm3d.VAggregate(denoise, radius=radius, sample=1)
+
+    shuffle = core.std.ShufflePlanes([denoise, opp32], [0,1,2], vs.YUV)
+    rgb32 = core.bm3d.OPP2RGB(shuffle, sample=1)
+    return core.resize.Point(rgb32, format=clip.format, matrix_s='709', dither_type='none')
 
 
 def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=False) -> vs.VideoNode:
