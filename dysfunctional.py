@@ -1,4 +1,5 @@
 import vapoursynth as vs
+from vsutil.clips import plane
 core = vs.core
 
 def STGraino(clip: vs.VideoNode, prefilter: callable = None, planes: list = [0,1,2], show_diff: bool = False, **kwargs) -> vs.VideoNode:
@@ -47,9 +48,10 @@ def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 
     if isinstance(strength, int): strength=[strength, strength]
 
     bits = clip.format.bits_per_sample
+    neutral = 1 << (clip.format.bits_per_sample - 1)
     if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
 
-    blank = core.std.BlankClip(clip, color=[128]*3)
+    blank = core.std.BlankClip(clip, color=[neutral]*3)
     grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     average = core.std.Merge(grain, core.misc.AverageFrames(grain, weights=weights), weight=[temporal_average / 100])
     
@@ -91,15 +93,15 @@ def horribleDNR(clip: vs.VideoNode, prefilter: callable = None, postfilter: call
     sharpNoise = core.std.MaskedMerge(avgNoise, __detailEnhance(avgNoise), maskEdges)
     # contrasharp expr stolen from havsfunc
     neutral = 1 << (clip.format.bits_per_sample - 1)
-    limitSharp = core.std.Expr([clip, sharpNoise], expr=[f'x {neutral} - abs y {neutral} - abs < x y ?'])
+    limitSharp = core.std.Expr([avgNoise, sharpNoise], expr=[f'x {neutral} - abs y {neutral} - abs < x y ?'])
 
     return core.std.MergeDiff(limitSharp, maskEdges)
 
 
-def bm3dGPU(clip: vs.VideoNode, sigma: int = 5, ref: callable = None, radius: int = 1, fast: bool = False) -> vs.VideoNode:
+def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: callable = None, radius: int = 2, fast: bool = False) -> vs.VideoNode:
     from havsfunc import SMDegrain
 
-    if ref is None: ref = lambda x: SMDegrain(x, tr=3, thSAD=100, thSADC=100, RefineMotion=True)
+    if ref is None: ref = lambda x: SMDegrain(x, tr=1, thSAD=100, RefineMotion=True, plane=0, chroma=False)
 
     opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709'), sample=1)
     reference = ref(clip)
