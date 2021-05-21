@@ -1,8 +1,8 @@
 import vapoursynth as vs
-from vsutil.clips import plane
+from typing import Callable, Optional
 core = vs.core
 
-def STGraino(clip: vs.VideoNode, prefilter: callable = None, planes: list = [0,1,2], show_diff: bool = False, **kwargs) -> vs.VideoNode:
+def STGraino(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, planes: list[int] = [0,1,2], show_diff: bool = False, **kwargs) -> vs.VideoNode:
     """
     STPresso: https://github.com/HomeOfVapourSynthEvolution/havsfunc/blob/master/havsfunc.py#L3535
     STPresso args can be parsed directly into this wrapper, i.e;
@@ -34,26 +34,24 @@ def STGraino(clip: vs.VideoNode, prefilter: callable = None, planes: list = [0,1
         diff = split(clip)
         
         diff_y = core.std.MakeDiff(planar[0], diff[0], planes=[0])
-        diff_cb = core.std.MakeDiff(planar[0], diff[0], planes=[0])
-        diff_cr = core.std.MakeDiff(planar[0], diff[0], planes=[0])
+        diff_cb = core.std.MakeDiff(planar[1], diff[1], planes=[0])
+        diff_cr = core.std.MakeDiff(planar[2], diff[2], planes=[0])
         return core.std.ShufflePlanes([diff_y, diff_cb, diff_cr], [0,0,0], vs.YUV)
 
     else: return depth(mrg, clip.format.bits_per_sample)
 
-# Control grain averaging with weights
-# Higher values = weaker grain and less entropy
-def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 7, temporal_average: int = 100, luma_scaling: float = 12.0, invert: bool = False) -> vs.VideoNode:
+
+def coolgrain(clip: vs.VideoNode, strength: list[int] = [5,0], radius: int = 3, luma_scaling: float = 12.0, invert: bool = False) -> vs.VideoNode:
     from vsutil import depth
 
     if isinstance(strength, int): strength=[strength, strength]
 
     bits = clip.format.bits_per_sample
-    neutral = 1 << (clip.format.bits_per_sample - 1)
     if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
 
-    blank = core.std.BlankClip(clip, color=[neutral]*3)
+    blank = core.std.BlankClip(clip, color=[128]*3)
     grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
-    average = core.std.Merge(grain, core.misc.AverageFrames(grain, weights=weights), weight=[temporal_average / 100])
+    average = core.misc.AverageFrames(grain, weights=[1] * (2 * radius + 1))
     
     diff = core.std.MakeDiff(blank, average)
     merge = core.std.Expr([clip, diff], ["x y +"])
@@ -67,47 +65,44 @@ def coolgrain(clip: vs.VideoNode, strength: list = [5,0], weights: list = [1] * 
     return depth(merge, bits, dither_type='none')
 
 
-def horribleDNR(clip: vs.VideoNode, prefilter: callable = None, postfilter: callable = None) -> vs.VideoNode:
-    from kagefunc import retinex_edgemask
-    from havsfunc import SMDegrain
-
-    def __detailEnhance(clip: vs.VideoNode) -> vs.VideoNode:
-        import numpy as np
-        import cv2
-        import muvsfunc_numpy as mufnp    
-        # https://github.com/WolframRhodium/muvsfunc/wiki/OpenCV-Python-for-VapourSynth#detail-enhancement-on-rgb-using-domain-transform
-        toRGB = core.resize.Point(clip, format=vs.RGB24, matrix_in_s='709')
-        enhance = lambda img: cv2.detailEnhance(img)
-        output = mufnp.numpy_process(toRGB, enhance, input_per_plane=False, output_per_plane=False)
-        return core.resize.Point(output, format=vs.YUV420P16, matrix_s='709')
+def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, postfilter: Optional[vs.VideoNode] = None, radius: int = 2) -> vs.VideoNode:
+    from G41Fun import DetailSharpen
     
     if prefilter is None: prefilter = lambda x: core.bilateral.Bilateral(x, sigmaS=0.8, sigmaR=0.05)
-    if postfilter is None: postfilter = lambda x: core.misc.AverageFrames(x, [1]*3)
+    if postfilter is None: postfilter = lambda x: DetailSharpen(x)
 
-    protEdges = retinex_edgemask(clip, sigma=1).std.Minimum().std.Maximum().std.Maximum()
+    protEdges = core.std.Prewitt(clip).std.Maximum()
     removeNoise = prefilter(clip)
     maskEdges = core.std.MaskedMerge(removeNoise, clip, protEdges)
 
     storeNoise = core.std.MakeDiff(clip, maskEdges, planes=[0,1,2])
-    avgNoise = core.std.Merge(storeNoise, postfilter(storeNoise), weight=[1])
-    sharpNoise = core.std.MaskedMerge(avgNoise, __detailEnhance(avgNoise), maskEdges)
+    avgNoise = core.misc.AverageFrames(storeNoise, weights=[1] * (2 * radius + 1))
+    sharpNoise = core.std.MaskedMerge(avgNoise, postfilter(avgNoise), maskEdges)
     # contrasharp expr stolen from havsfunc
     neutral = 1 << (clip.format.bits_per_sample - 1)
-    limitSharp = core.std.Expr([avgNoise, sharpNoise], expr=[f'x {neutral} - abs y {neutral} - abs < x y ?'])
+    limitSharp = core.std.Expr([clip, sharpNoise], expr=[f'x {neutral} - abs y {neutral} - abs < x y ?'])
 
     return core.std.MergeDiff(limitSharp, maskEdges)
 
 
-def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: callable = None, radius: int = 2, fast: bool = False) -> vs.VideoNode:
+def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = None, profile: Optional[str] = None, fast: bool = False) -> vs.VideoNode:
     from havsfunc import SMDegrain
 
+    # CUDA implementation only has a few settings implomented as of writing
+    if profile is None   : profile = 'fast'
+    if profile == 'fast' : block_step, bm_range, radius, ps_num, ps_range = 7,   7,  1,   2,  5
+    if profile == 'lc'   : block_step, bm_range, radius, ps_num, ps_range = 5,   9,  2,   2,  5
+    if profile == 'np'   : block_step, bm_range, radius, ps_num, ps_range = 3,  12,  3,   2,  6
+    if profile == 'high' : block_step, bm_range, radius, ps_num, ps_range = 2,  16,  4,   2,  8
+    if profile == 'vn'   : block_step, bm_range, radius, ps_num, ps_range = 6,  12,  4,   2,  6
+    
     if ref is None: ref = lambda x: SMDegrain(x, tr=1, thSAD=100, RefineMotion=True, plane=0, chroma=False)
 
     opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709'), sample=1)
     reference = ref(clip)
     reference = core.bm3d.RGB2OPP(core.resize.Point(reference, format=vs.RGBS, matrix_in_s='709'), sample=1)
-    
-    denoise = core.bm3dcuda.BM3D(opp32, reference, sigma=[sigma, 0, 0], radius=radius, fast=fast, block_step=[5]*4, bm_range=[8]*4, ps_num=2, ps_range=1)
+
+    denoise = core.bm3dcuda.BM3D(opp32, ref=reference, sigma=[sigma, 0, 0], fast=fast, block_step=block_step, bm_range=bm_range, radius=radius, ps_num=ps_num, ps_range=ps_range)
     denoise = core.bm3d.VAggregate(denoise, radius=radius, sample=1)
 
     shuffle = core.std.ShufflePlanes([denoise, opp32], [0,1,2], vs.YUV)
@@ -115,7 +110,7 @@ def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: callable = None, radius: in
     return core.resize.Point(rgb32, format=clip.format, matrix_s='709', dither_type='none')
 
 
-def FDOG(clip: vs.VideoNode, retinex=True, div=2, bits=16, sigma=1.5, opencl=False) -> vs.VideoNode:
+def FDOG(clip: vs.VideoNode, retinex: bool = True, div: list[float] = 2, bits: int = 16, sigma: float = 1.5, opencl: bool = False) -> vs.VideoNode:
     from vsutil import depth, get_depth, get_y
 
     if isinstance(div, int): div=[div, div]
