@@ -1,8 +1,7 @@
 import vapoursynth as vs
 from typing import Callable, Optional
-
-import vsutil
 core = vs.core
+
 
 def coolgrain(clip: vs.VideoNode, strength: list[int] = [5,0], radius: int = 3, luma_scaling: float = 12.0, invert: bool = False) -> vs.VideoNode:
     from vsutil import depth
@@ -49,6 +48,7 @@ def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, po
 
 
 def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = None, profile: Optional[str] = None, fast: bool = False) -> vs.VideoNode:
+    from vsutil import get_y, depth
     from havsfunc import SMDegrain
 
     # CUDA implementation only has a few settings implemented as of writing
@@ -62,8 +62,8 @@ def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = No
     # This is dumb, but it saves some CPU cycles - havsfunc wrapper may be inefficient 
     if ref is None:
         def ref(clip: vs.VideoNode) -> vs.VideoNode:
-            luma = vsutil.get_y(clip)
-            if luma.format.bits_per_sample != 16: luma = vsutil.depth(luma, 16)
+            luma = get_y(clip)
+            if luma.format.bits_per_sample != 16: luma = depth(luma, 16)
             return core.std.ShufflePlanes([SMDegrain(luma, tr=3, thSAD=100, RefineMotion=True, plane=0), luma], [0,0,0], vs.YUV)
 
 
