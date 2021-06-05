@@ -1,45 +1,8 @@
 import vapoursynth as vs
 from typing import Callable, Optional
+
+import vsutil
 core = vs.core
-
-def STGraino(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, planes: list[int] = [0,1,2], show_diff: bool = False, **kwargs) -> vs.VideoNode:
-    """
-    STPresso: https://github.com/HomeOfVapourSynthEvolution/havsfunc/blob/master/havsfunc.py#L3535
-    STPresso args can be parsed directly into this wrapper, i.e;
-    grn = dsf.STGraino(clip, core.bilateral.Bilateral, planes=[1,2,2], limit=4, bias=65, tbias=50, tthr=32, show_diff=True)
-    -
-    TODO: \o/
-    """
-    from vsutil import split, join, depth
-    from havsfunc import STPresso
-
-    if prefilter is None: prefilter = lambda x: core.bilateral.Bilateral(x)
-
-    planar = split(clip)
-
-    if 0 in planes: planar[0] = prefilter(planar[0])
-    if 1 in planes: planar[1] = prefilter(planar[1])
-    if 2 in planes: planar[2] = prefilter(planar[2])
-
-    dns = join(planar)
-
-    dif = core.std.MakeDiff(clip, dns, planes=planes)
-    rgn = STPresso(dif, **kwargs, planes=planes)
-    mrg = core.std.MergeDiff(dns, rgn, planes=planes)
-
-    # Living true to the name
-    # not really sure what to do about this
-    if show_diff is True:
-
-        diff = split(clip)
-        
-        diff_y = core.std.MakeDiff(planar[0], diff[0], planes=[0])
-        diff_cb = core.std.MakeDiff(planar[1], diff[1], planes=[0])
-        diff_cr = core.std.MakeDiff(planar[2], diff[2], planes=[0])
-        return core.std.ShufflePlanes([diff_y, diff_cb, diff_cr], [0,0,0], vs.YUV)
-
-    else: return depth(mrg, clip.format.bits_per_sample)
-
 
 def coolgrain(clip: vs.VideoNode, strength: list[int] = [5,0], radius: int = 3, luma_scaling: float = 12.0, invert: bool = False) -> vs.VideoNode:
     from vsutil import depth
@@ -49,7 +12,7 @@ def coolgrain(clip: vs.VideoNode, strength: list[int] = [5,0], radius: int = 3, 
     bits = clip.format.bits_per_sample
     if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
 
-    blank = core.std.BlankClip(clip, color=[128]*3)
+    blank = core.std.BlankClip(clip, color=[128]*clip.format.num_planes)
     grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     average = core.misc.AverageFrames(grain, weights=[1] * (2 * radius + 1))
     
@@ -88,7 +51,7 @@ def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, po
 def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = None, profile: Optional[str] = None, fast: bool = False) -> vs.VideoNode:
     from havsfunc import SMDegrain
 
-    # CUDA implementation only has a few settings implomented as of writing
+    # CUDA implementation only has a few settings implemented as of writing
     if profile is None   : profile = 'fast'
     if profile == 'fast' : block_step, bm_range, radius, ps_num, ps_range = 7,   7,  1,   2,  5
     if profile == 'lc'   : block_step, bm_range, radius, ps_num, ps_range = 5,   9,  2,   2,  5
@@ -96,18 +59,25 @@ def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = No
     if profile == 'high' : block_step, bm_range, radius, ps_num, ps_range = 2,  16,  4,   2,  8
     if profile == 'vn'   : block_step, bm_range, radius, ps_num, ps_range = 6,  12,  4,   2,  6
     
-    if ref is None: ref = lambda x: SMDegrain(x, tr=1, thSAD=100, RefineMotion=True, plane=0, chroma=False)
+    # This is dumb, but it saves some CPU cycles - havsfunc wrapper may be inefficient 
+    if ref is None:
+        def ref(clip: vs.VideoNode) -> vs.VideoNode:
+            luma = vsutil.get_y(clip)
+            if luma.format.bits_per_sample != 16: luma = vsutil.depth(luma, 16)
+            return core.std.ShufflePlanes([SMDegrain(luma, tr=3, thSAD=100, RefineMotion=True, plane=0), luma], [0,0,0], vs.YUV)
 
-    opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709'), sample=1)
-    reference = ref(clip)
-    reference = core.bm3d.RGB2OPP(core.resize.Point(reference, format=vs.RGBS, matrix_in_s='709'), sample=1)
 
-    denoise = core.bm3dcuda.BM3D(opp32, ref=reference, sigma=[sigma, 0, 0], fast=fast, block_step=block_step, bm_range=bm_range, radius=radius, ps_num=ps_num, ps_range=ps_range)
-    denoise = core.bm3d.VAggregate(denoise, radius=radius, sample=1)
+    opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709', range_in_s='limited', range_s='full'), sample=1)
+    reference = core.bm3d.RGB2OPP(core.resize.Point(ref(clip), format=vs.RGBS, matrix_in_s='709'), sample=1)
+
+    denoise = core.bm3dcuda_rtc.BM3D(opp32, ref=reference, sigma=[sigma, 0, 0], fast=fast, extractor_exp=8, transform_2d_s='DCT', transform_1d_s='DCT',
+    block_step=block_step, bm_range=bm_range, radius=radius, ps_num=ps_num, ps_range=ps_range)
+    if radius > 0: 
+        denoise = core.bm3d.VAggregate(denoise, radius=radius, sample=1)
 
     shuffle = core.std.ShufflePlanes([denoise, opp32], [0,1,2], vs.YUV)
     rgb32 = core.bm3d.OPP2RGB(shuffle, sample=1)
-    return core.resize.Point(rgb32, format=clip.format, matrix_s='709', dither_type='none')
+    return core.resize.Point(rgb32, format=clip.format, matrix_s='709', range_s='limited', range_in_s='full', dither_type='error_diffusion')
 
 
 def FDOG(clip: vs.VideoNode, retinex: bool = True, div: list[float] = 2, bits: int = 16, sigma: float = 1.5, opencl: bool = False) -> vs.VideoNode:
@@ -277,7 +247,9 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
         return c[0]
 
 
-def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom=0, top=0, ar=16 / 9, shader_path=None, shader_str=None):
+def ssimdown(clip: vs.VideoNode, preset: Optional[str] = None, width: Optional[int] = None, height: Optional[int] = None,
+             left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9, 
+             shader_path: Optional[str] = None, shader_str = Optional[Callable[..., str]]) -> vs.VideoNode:
     """
     ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
     only works with 420 atm since 444 would probably add krigbilateral to the mix
@@ -355,5 +327,3 @@ def ssimdown(clip, preset=None, width=None, height=None, left=0, right=0, bottom
     v = v.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=v.width - c[0] - c[1], src_top=c[2], src_height=v.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind)
-
-
