@@ -43,8 +43,8 @@ def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list
     from zzfunc.util import vs_to_mv
     import rgvs
         
+    bits = clip.format.bits_per_sample
     if clip.format.bits_per_sample != 32:
-        bits = clip.format.bits_per_sample
         clip = depth(clip, 32)
     
     if blksize is None:
