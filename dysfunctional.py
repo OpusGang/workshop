@@ -25,7 +25,7 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
     merge = core.std.Expr([clip, diff], ["x y +"])
 
     if luma_scaling > 0:
-        mask = core.adg.Mask(core.std.PlaneStats(clip))
+        mask = core.adg.Mask(core.std.PlaneStats(clip), luma_scaling=luma_scaling)
 
         if invert is True: mask = core.std.Invert(mask)
         merge = core.std.MaskedMerge(clip, merge, mask)
@@ -39,9 +39,12 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
 
 def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list[int] = [0,1,2], blksize: int = None, overlap: int = None,
                   pel: int = None, recalc: bool = False, pf: Optional[Callable[[vs.VideoNode, vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
-    from vsutil import depth, plane
+    from vsutil import depth
     from zzfunc.util import vs_to_mv
     import rgvs
+    
+    if not isinstance(clip, vs.VideoNode):
+        raise TypeError('CoolDegrain: This is not a clip')
         
     bits = clip.format.bits_per_sample
     if clip.format.bits_per_sample != 32:
@@ -82,9 +85,8 @@ def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list
         super_r = core.mvsf.Super(prefilt, pel=pel, sharp=2, rfilter=4)
         analyse = core.mvsf.Recalculate(super_r, analyse, overlap=overlap, blksize=blksize)
     
-    filter = core.mvsf.Degrain(clip, super, analyse, thsad=thSAD, plane=vs_to_mv(planes))
-
-    return depth(filter, bits)
+    degrain = core.mvsf.Degrain(clip, super, analyse, thsad=thSAD, plane=vs_to_mv(planes))
+    return depth(degrain, bits)
 
 
 def horribleDNR(clip: vs.VideoNode, prefilter: Optional[Callable[..., vs.VideoNode]] = None,
