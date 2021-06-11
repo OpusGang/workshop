@@ -4,7 +4,8 @@ core = vs.core
 from typing import Callable, Optional
 
 
-def coolgrain(clip: vs.VideoNode, strength: list[int, Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0, cutoff: Optional[float] = None, invert: bool = False) -> vs.VideoNode:
+def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0,
+              cutoff: Optional[float] = None, invert: bool = False) -> vs.VideoNode:
     from vsutil import depth, scale_value
     
     if isinstance(strength, int): strength=[strength, strength]
@@ -36,7 +37,58 @@ def coolgrain(clip: vs.VideoNode, strength: list[int, Optional[int]] = [5,0], ra
     return depth(merge, bits, dither_type='none')
 
 
-def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, postfilter: Optional[vs.VideoNode] = None, radius: int = 2) -> vs.VideoNode:
+def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list[int] = [0,1,2], blksize: int = None, overlap: int = None,
+                  pel: int = None, recalc: bool = False, pf: Optional[Callable[[vs.VideoNode, vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
+    from vsutil import depth, plane
+    from zzfunc.util import vs_to_mv
+    import rgvs
+        
+    if clip.format.bits_per_sample != 32:
+        bits = clip.format.bits_per_sample
+        clip = depth(clip, 32)
+    
+    if blksize is None:
+        if clip.width < 1280 or clip.height < 720:
+            blksize = 8
+        elif clip.width >= 3840 or clip.height >= 2160:
+            blksize = 32
+        else:
+            blksize = 16
+    
+    if overlap is None:
+        overlap = blksize // 2
+        
+    if pel is None:
+        if clip.width < 1280 or clip.height < 720:
+            pel = 2
+        else:
+            pel = 1
+        
+    if tr not in range(1, 25):
+        raise ValueError('tr must be between 1 and 24.')
+    
+    pfclip = pf if pf is not None else clip
+    
+    super = core.mvsf.Super(clip, pel=pel, sharp=2, rfilter=4)
+    analyse = core.mvsf.Analyze(super, radius=tr, isb=True, overlap=overlap, blksize=blksize)
+
+    # This seems useless
+    if recalc is True:
+        hoverlap = overlap // 2
+        hblksize = blksize // 2
+        hthsad = thSAD // 2
+        
+        prefilt = rgvs.removegrain(clip, mode=4, planes=0)
+        super_r = core.mvsf.Super(prefilt, pel=pel, sharp=2, rfilter=4)
+        analyse = core.mvsf.Recalculate(super_r, analyse, overlap=overlap, blksize=blksize)
+    
+    filter = core.mvsf.Degrain(clip, super, analyse, thsad=thSAD, plane=vs_to_mv(planes))
+
+    return depth(filter, bits)
+
+
+def horribleDNR(clip: vs.VideoNode, prefilter: Optional[Callable[..., vs.VideoNode]] = None,
+                postfilter: Optional[Callable[..., vs.VideoNode]] = None, radius: int = 2) -> vs.VideoNode:
     from G41Fun import DetailSharpen
     
     if prefilter is None: prefilter = lambda x: core.bilateral.Bilateral(x, sigmaS=0.8, sigmaR=0.05)
@@ -49,6 +101,7 @@ def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, po
     storeNoise = core.std.MakeDiff(clip, maskEdges, planes=[0,1,2])
     avgNoise = core.misc.AverageFrames(storeNoise, weights=[1] * (2 * radius + 1))
     sharpNoise = core.std.MaskedMerge(avgNoise, postfilter(avgNoise), maskEdges)
+    
     # contrasharp expr stolen from havsfunc
     neutral = 1 << (clip.format.bits_per_sample - 1)
     limitSharp = core.std.Expr([clip, sharpNoise], expr=[f'x {neutral} - abs y {neutral} - abs < x y ?'])
@@ -56,7 +109,8 @@ def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None, po
     return core.std.MergeDiff(limitSharp, maskEdges)
 
 
-def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = None, profile: Optional[str] = None, fast: bool = False) -> vs.VideoNode:
+def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[Callable[..., vs.VideoNode]] = None,
+            profile: Optional[str] = None, fast: bool = False) -> vs.VideoNode:
     from vsutil import get_y, depth
     from havsfunc import SMDegrain
 
@@ -73,8 +127,7 @@ def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = No
         def ref(clip: vs.VideoNode) -> vs.VideoNode:
             luma = get_y(clip)
             if luma.format.bits_per_sample != 16: luma = depth(luma, 16)
-            return core.std.ShufflePlanes([SMDegrain(luma, tr=3, thSAD=100, RefineMotion=True, plane=0), luma], [0,0,0], vs.YUV)
-
+            return core.std.ShufflePlanes([SMDegrain(luma, tr=2, thSAD=300, RefineMotion=True, plane=0), luma], [0,0,0], vs.YUV)
 
     opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709', range_in_s='limited', range_s='full'), sample=1)
     reference = core.bm3d.RGB2OPP(core.resize.Point(ref(clip), format=vs.RGBS, matrix_in_s='709'), sample=1)
