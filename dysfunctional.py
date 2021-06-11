@@ -4,7 +4,7 @@ core = vs.core
 from typing import Callable, Optional
 
 
-def coolgrain(clip: vs.VideoNode, strength: list[int, Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0, invert: bool = False) -> vs.VideoNode:
+def coolgrain(clip: vs.VideoNode, strength: list[int, Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0, cutoff: Optional[float] = None, invert: bool = False) -> vs.VideoNode:
     from vsutil import depth, scale_value
     
     if isinstance(strength, int): strength=[strength, strength]
@@ -14,15 +14,13 @@ def coolgrain(clip: vs.VideoNode, strength: list[int, Optional[int]] = [5,0], ra
     
     # generate and process at half resolution
     blank = core.std.BlankClip(clip, width=clip.width / 2, height=clip.height / 2, color=[scale_value(127, 8, 32)]*clip.format.num_planes)
-    grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     
-    # clamp to TV range
-    limit = core.std.Limiter(grain, min=scale_value(16, 8, 32), max=[scale_value(235, 8, 32), scale_value(240, 8, 32)], planes=[0])
-    average = core.misc.AverageFrames(limit, weights=[1] * (2 * radius + 1)) 
+    grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
+    average = core.misc.AverageFrames(grain, weights=[1] * (2 * radius + 1)) 
     
     # Lover CPU usage via placebo
     diff = core.std.MakeDiff(blank, average).placebo.Resample(width=clip.width, height=clip.height, filter='robidoux', param1=0, param2=0)
-    
+
     merge = core.std.Expr([clip, diff], ["x y +"])
 
     if luma_scaling > 0:
@@ -30,7 +28,11 @@ def coolgrain(clip: vs.VideoNode, strength: list[int, Optional[int]] = [5,0], ra
 
         if invert is True: mask = core.std.Invert(mask)
         merge = core.std.MaskedMerge(clip, merge, mask)
-
+        
+    # clip just above legal range
+    if cutoff is not None:
+        merge = core.std.MaskedMerge(clip, merge, core.std.Binarize(clip, scale_value(cutoff, 8, 32, scale_offsets=True)))
+        
     return depth(merge, bits, dither_type='none')
 
 
