@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 
 def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0,
-              invert: bool = False, cutoff: Optional[float] = None, divby: float = 1, **placebo_args) -> vs.VideoNode:
+              invert: bool = False, cutoff: Optional[float] = None, divby: Optional[float] = None, **placebo_args) -> vs.VideoNode:
     from vsutil import depth, scale_value
     
     placebo: Dict[str, Any] = dict(filter='robidouxsharp', param1=0, param2=0)
@@ -15,15 +15,23 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
     
     bits = clip.format.bits_per_sample
     if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
-    
-    # generate and process at half resolution
-    blank = core.std.BlankClip(clip, width=clip.width / divby, height=clip.height / divby, color=[scale_value(127, 8, 32)]*clip.format.num_planes)
+        
+    # generate and process at an optional resolution
+    if divby is None:
+        width, height = clip.width, clip.height
+    else:
+        width, height = clip.width / divby, clip.height / divby
+        
+    blank = core.std.BlankClip(clip, width=width, height=height, color=[scale_value(127, 8, 32)]*clip.format.num_planes)
     
     grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     average = core.misc.AverageFrames(grain, weights=[1] * (2 * radius + 1)) 
     
-    # Lover CPU usage via placebo
-    diff = core.std.MakeDiff(blank, average).placebo.Resample(width=clip.width, height=clip.height, **placebo)
+    diff = core.std.MakeDiff(blank, average)
+    
+    # Reduce overall CPU overhead with libplacebo rather than using zimg
+    # Even minor resampling is surprisingly expensive for the CPU
+    if divby > 1: diff = core.placebo.Resample(diff, width=clip.width, height=clip.height, **placebo)
 
     merge = core.std.Expr([clip, diff], ["x y +"])
 
