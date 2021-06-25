@@ -5,22 +5,25 @@ from typing import Callable, Optional
 
 
 def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0,
-              cutoff: Optional[float] = None, invert: bool = False) -> vs.VideoNode:
+              invert: bool = False, cutoff: Optional[float] = None, divby: float = 1, **placebo_args) -> vs.VideoNode:
     from vsutil import depth, scale_value
     
+    placebo: Dict[str, Any] = dict(filter='robidouxsharp', param1=0, param2=0)
+    placebo |= placebo_args
+    
     if isinstance(strength, int): strength=[strength, strength]
-
+    
     bits = clip.format.bits_per_sample
     if clip.format.bits_per_sample != 32: clip = depth(clip, 32)
     
     # generate and process at half resolution
-    blank = core.std.BlankClip(clip, width=clip.width / 2, height=clip.height / 2, color=[scale_value(127, 8, 32)]*clip.format.num_planes)
+    blank = core.std.BlankClip(clip, width=clip.width / divby, height=clip.height / divby, color=[scale_value(127, 8, 32)]*clip.format.num_planes)
     
     grain = core.grain.Add(blank, var=strength[0], uvar=strength[1], seed=444)
     average = core.misc.AverageFrames(grain, weights=[1] * (2 * radius + 1)) 
     
     # Lover CPU usage via placebo
-    diff = core.std.MakeDiff(blank, average).placebo.Resample(width=clip.width, height=clip.height, filter='robidoux', param1=0, param2=0)
+    diff = core.std.MakeDiff(blank, average).placebo.Resample(width=clip.width, height=clip.height, **placebo)
 
     merge = core.std.Expr([clip, diff], ["x y +"])
 
@@ -38,7 +41,7 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
 
 
 def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list[int] = [0,1,2], blksize: int = None, overlap: int = None,
-                  pel: int = None, recalc: bool = False, pf: Optional[Callable[[vs.VideoNode, vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
+                  pel: int = None, recalc: bool = False, pf: Optional[vs.VideoNode] = None) -> vs.VideoNode:
     from vsutil import depth
     from zzfunc.util import vs_to_mv
     import rgvs
@@ -89,8 +92,106 @@ def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list
     return depth(degrain, bits)
 
 
-def horribleDNR(clip: vs.VideoNode, prefilter: Optional[Callable[..., vs.VideoNode]] = None,
-                postfilter: Optional[Callable[..., vs.VideoNode]] = None, radius: int = 2) -> vs.VideoNode:
+def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 48, planes: list[int] = [0,1,2],
+                bits: int = 16, blksize: int = None, overlap: int = None, pel: int = None, recalc: bool = False,
+                pf: Optional[vs.VideoNode] = None ) -> vs.VideoNode:
+    from vsutil import depth
+    from zzfunc.util import vs_to_mv
+    import rgvs
+    
+    if not isinstance(clip, vs.VideoNode):
+        raise TypeError('CoolDegrain: This is not a clip')
+    
+    store_bits = clip.format.bits_per_sample
+    if clip.format.bits_per_sample not in [16, 32]:
+        clip = depth(clip, bits)
+    
+    plane = vs_to_mv(planes)
+    
+    pfclip = pf if pf is not None else clip
+    
+    if thSADC is None:
+        thSADC = thSAD
+        
+    if blksize is None:
+        if clip.width < 1280 or clip.height < 720:
+            blksize = 8
+        elif clip.width >= 3840 or clip.height >= 2160:
+            blksize = 32
+        else:
+            blksize = 16
+    
+    if overlap is None:
+        overlap = blksize // 2
+        
+    if pel is None:
+        if clip.width < 1280 or clip.height < 720:
+            pel = 2
+        else:
+            pel = 1
+        
+    if tr not in range(1, 25):
+        raise ValueError('tr must be between 1 and 24.')
+
+    if bits == 16:
+        super = core.mv.Super(pfclip, pel=pel, sharp=2, rfilter=4)
+    
+        # at least tr=1, so no checks here
+        mvbw1 = core.mv.Analyse(super, isb=True, delta=1, overlap=overlap, blksize=blksize)
+        mvfw1 = core.mv.Analyse(super, isb=False, delta=1, overlap=overlap, blksize=blksize)
+        if tr >= 2:
+            mvbw2 = core.mv.Analyse(super, isb=True, delta=2, overlap=overlap, blksize=blksize)
+            mvfw2 = core.mv.Analyse(super, isb=False, delta=2, overlap=overlap, blksize=blksize)
+        if tr >= 3:
+            mvbw3 = core.mv.Analyse(super, isb=True, delta=3, overlap=overlap, blksize=blksize)
+            mvfw3 = core.mv.Analyse(super, isb=False, delta=3, overlap=overlap, blksize=blksize)
+
+        if recalc is True:
+            hoverlap = overlap // 2
+            hblksize = blksize // 2
+            hthsad = thSAD // 2
+
+            prefilt = core.rgvs.RemoveGrain(clip, 4)
+            super_r = core.mv.Super(prefilt, pel=pel, sharp=2, rfilter=4)
+
+            mvbw1 = core.mv.Recalculate(super_r, mvbw1, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+            mvfw1 = core.mv.Recalculate(super_r, mvfw1, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+            if tr >= 2:
+                mvbw2 = core.mv.Recalculate(super_r, mvbw2, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+                mvfw2 = core.mv.Recalculate(super_r, mvfw2, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+            if tr >= 3:
+                mvbw3 = core.mv.Recalculate(super_r, mvbw3, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+                mvfw3 = core.mv.Recalculate(super_r, mvfw3, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+
+        if tr == 1:
+            filtered = core.mv.Degrain1(clip=clip, super=super, mvbw=mvbw1, mvfw=mvfw1, thsad=thSAD, thsadc=thSADC, plane=plane)
+        elif tr == 2:
+            filtered = core.mv.Degrain2(clip=clip, super=super, mvbw=mvbw1, mvfw=mvfw1, mvbw2=mvbw2, mvfw2=mvfw2, thsad=thSAD, thsadc=thSADC, plane=plane)
+        elif tr == 3:
+            filtered = core.mv.Degrain3(clip=clip, super=super, mvbw=mvbw1, mvfw=mvfw1, mvbw2=mvbw2, mvfw2=mvfw2, mvbw3=mvbw3, mvfw3=mvfw3, thsad=thSAD, thsadc=thSADC, plane=plane)
+        
+    else:
+        super = core.mvsf.Super(clip, pel=pel, sharp=2, rfilter=4)
+        analyse = core.mvsf.Analyze(super, radius=tr, isb=True, overlap=overlap, blksize=blksize)
+
+        # This seems more than useless, even with better prefilters (KNL, bilateral...).
+        if recalc is True:
+            hoverlap = overlap // 2
+            hblksize = blksize // 2
+            hthsad = thSAD // 2
+
+            prefilt = rgvs.removegrain(clip, mode=4, planes=0)
+            super_r = core.mvsf.Super(prefilt, pel=pel, sharp=2, rfilter=4)
+            analyse = core.mvsf.Recalculate(super_r, analyse, overlap=overlap, blksize=blksize)
+
+        # Unforunately, we cannot make use of thSADC at this depth. I don't recommend mvtools for chroma processing anyway.
+        filtered = core.mvsf.Degrain(clip, super, analyse, thsad=thSAD, plane=plane, limit=1)
+        
+    return depth(filtered, store_bits)
+
+
+def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None,
+                postfilter: Optional[vs.VideoNode] = None, radius: int = 2) -> vs.VideoNode:
     from G41Fun import DetailSharpen
     
     if prefilter is None: prefilter = lambda x: core.bilateral.Bilateral(x, sigmaS=0.8, sigmaR=0.05)
@@ -111,31 +212,40 @@ def horribleDNR(clip: vs.VideoNode, prefilter: Optional[Callable[..., vs.VideoNo
     return core.std.MergeDiff(limitSharp, maskEdges)
 
 
-def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[Callable[..., vs.VideoNode]] = None,
+def bm3dGPU(clip: vs.VideoNode, sigma: int = 3, ref: Optional[vs.VideoNode] = None,
             profile: Optional[str] = None, fast: bool = False) -> vs.VideoNode:
-    from vsutil import get_y, depth
-    from havsfunc import SMDegrain
+    """Worlds wost BM3D(CUDA) wrapper. Abuse as you see fit.
+    dysfunctional.bm3dGPU(clip, ref=lambda x: SMDegrain(x, tr=1, thSAD=125, planes=0), sigma=3, profile='lc')
 
-    # CUDA implementation only has a few settings implemented as of writing
+    Args:
+        clip (vs.VideoNode): Input clip
+        sigma (int, optional): Denoise strength. Defaults to 3.
+        ref (Optional[vs.VideoNode]): Optional reference clip, only the first plane is referenced. Defaults to None (SMDegrain).
+        profile (Optional[str], optional): See BM3D docs for info. Defaults to None.
+        fast (bool, optional): Use CPU for additonal speed. Defaults to False.
+
+    Returns:
+        vs.VideoNode: Denoised clip
+    """
+
+    from vsutil import get_y, depth
+
     if profile is None   : profile = 'fast'
     if profile == 'fast' : block_step, bm_range, radius, ps_num, ps_range = 7,   7,  1,   2,  5
     if profile == 'lc'   : block_step, bm_range, radius, ps_num, ps_range = 5,   9,  2,   2,  5
     if profile == 'np'   : block_step, bm_range, radius, ps_num, ps_range = 3,  12,  3,   2,  6
     if profile == 'high' : block_step, bm_range, radius, ps_num, ps_range = 2,  16,  4,   2,  8
     if profile == 'vn'   : block_step, bm_range, radius, ps_num, ps_range = 6,  12,  4,   2,  6
-    
-    # This is dumb, but it saves some CPU cycles - havsfunc wrapper may be inefficient 
-    if ref is None:
-        def ref(clip: vs.VideoNode) -> vs.VideoNode:
-            luma = get_y(clip)
-            if luma.format.bits_per_sample != 16: luma = depth(luma, 16)
-            return core.std.ShufflePlanes([SMDegrain(luma, tr=2, thSAD=300, RefineMotion=True, plane=0), luma], [0,0,0], vs.YUV)
 
     opp32 = core.bm3d.RGB2OPP(core.resize.Point(clip, format=vs.RGBS, matrix_in_s='709', range_in_s='limited', range_s='full'), sample=1)
-    reference = core.bm3d.RGB2OPP(core.resize.Point(ref(clip), format=vs.RGBS, matrix_in_s='709'), sample=1)
-
-    denoise = core.bm3dcuda_rtc.BM3D(opp32, ref=reference, sigma=[sigma, 0, 0], fast=fast, extractor_exp=8, transform_2d_s='DCT', transform_1d_s='DCT',
-    block_step=block_step, bm_range=bm_range, radius=radius, ps_num=ps_num, ps_range=ps_range)
+    
+    if ref is not None:
+        rgb = core.resize.Point(ref(get_y(clip)), format=vs.RGBS, matrix_in_s='709')
+        reference = core.bm3d.RGB2OPP(rgb, sample=1)
+        denoise = core.bm3dcuda_rtc.BM3D(opp32, ref=reference, sigma=[sigma, 0, 0], fast=fast, extractor_exp=8, transform_1d_s='DCT', transform_2d_s='DCT', block_step=block_step, bm_range=bm_range, radius=radius, ps_num=ps_num, ps_range=ps_range)
+    else:
+        denoise = core.bm3dcuda_rtc.BM3D(opp32, sigma=[sigma, 0, 0], fast=fast, extractor_exp=8, transform_1d_s='DCT', transform_2d_s='DCT', block_step=block_step, bm_range=bm_range, radius=radius, ps_num=ps_num, ps_range=ps_range)
+        
     if radius > 0: 
         denoise = core.bm3d.VAggregate(denoise, radius=radius, sample=1)
 
@@ -313,7 +423,7 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
 
 def ssimdown(clip: vs.VideoNode, preset: Optional[str] = None, width: Optional[int] = None, height: Optional[int] = None,
              left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9, 
-             shader_path: Optional[str] = None, shader_str = Optional[Callable[..., str]]) -> vs.VideoNode:
+             shader_path: Optional[str] = None, shader_str: Optional[str] = None) -> vs.VideoNode:
     """
     ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
     only works with 420 atm since 444 would probably add krigbilateral to the mix
