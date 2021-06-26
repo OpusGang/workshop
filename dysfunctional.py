@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0,
               invert: bool = False, cutoff: Optional[float] = None, divby: Optional[float] = None, **placebo_args) -> vs.VideoNode:
-    from vsutil import depth, scale_value
+    from vsutil import depth, scale_value, split, join
     
     placebo: Dict[str, Any] = dict(filter='robidouxsharp', param1=0, param2=0)
     placebo |= placebo_args
@@ -31,7 +31,7 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
     
     # Reduce overall CPU overhead with libplacebo rather than using zimg
     # Even minor resampling is surprisingly expensive for the CPU
-    if divby > 1: diff = core.placebo.Resample(diff, width=clip.width, height=clip.height, **placebo)
+    if divby is not None: diff = core.placebo.Resample(diff, width=clip.width, height=clip.height, **placebo)
 
     merge = core.std.Expr([clip, diff], ["x y +"])
 
@@ -40,7 +40,7 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
 
         if invert is True: mask = core.std.Invert(mask)
         merge = core.std.MaskedMerge(clip, merge, mask)
-        
+    
     # clip just above legal range
     if cutoff is not None:
         merge = core.std.MaskedMerge(clip, merge, core.std.Binarize(clip, scale_value(cutoff, 8, 32, scale_offsets=True)))
@@ -48,8 +48,7 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
     return depth(merge, bits, dither_type='none')
 
 
-def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list[int] = [0,1,2], blksize: int = None, overlap: int = None,
-                  pel: int = None, recalc: bool = False, pf: Optional[vs.VideoNode] = None) -> vs.VideoNode:
+def CoolDegrainSF(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, planes: list[int] = [0,1,2], blksize: int = None, overlap: int = None, pel: int = None, recalc: bool = False, pf: Optional[vs.VideoNode] = None) -> vs.VideoNode:
     from vsutil import depth
     from zzfunc.util import vs_to_mv
     import rgvs
@@ -196,6 +195,60 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 
         filtered = core.mvsf.Degrain(clip, super, analyse, thsad=thSAD, plane=plane, limit=1)
         
     return depth(filtered, store_bits)
+
+
+def unknownDideeDNR1(clip: vs.VideoNode) -> vs.VideoNode:
+    from vsutil import scale_value
+    from rgvs import minblur
+    #https://forum.doom9.org/showthread.php?p=1076491#post1076491
+    # This seems to be more or less a precursor to SMDegrain
+    # Much slower (probably due to FFT3D, only slightly better)
+    
+    neutral = scale_value(128, 8, clip.format.bits_per_sample)
+    
+    # Here, we simply use FFT3DFilter. There're lots of other possibilities. Basically, you shouldn't use 
+    # a clip with "a tiny bit of filtering". The search clip has to be CALM. Ideally, it should be "dead calm".
+    refClip = core.fft3dfilter.FFT3DFilter(clip, sigma=16, sigma2=10, sigma3=6, sigma4=4, bt=5, bw=16, bh=16, ow=8, oh=8)
+    
+    diffClip1 = core.std.MakeDiff(clip, refClip)
+    
+    # motion vector search (with very basic parameters. Add your own parameters as needed.)
+    suClip = core.mv.Super(refClip, pel=2, sharp=2)
+    b3vec1 = core.mv.Analyse(suClip, isb=True,  delta = 3, pelsearch = 2, overlap=4)
+    b2vec1 = core.mv.Analyse(suClip, isb=True,  delta = 2, pelsearch = 2, overlap=4)
+    b1vec1 = core.mv.Analyse(suClip, isb=True,  delta = 1, pelsearch = 2, overlap=4)
+    f1vec1 = core.mv.Analyse(suClip, isb=False, delta = 1, pelsearch = 2, overlap=4)
+    f2vec1 = core.mv.Analyse(suClip, isb=False, delta = 2, pelsearch = 2, overlap=4)
+    f3vec1 = core.mv.Analyse(suClip, isb=False, delta = 3, pelsearch = 2, overlap=4)
+    
+    # 1st MV-denoising stage. Usually here's some temporal-median filtering going on.
+    # For simplicity, we just use MVDegrain.
+    removeNoise = core.mv.Degrain3(clip, super=suClip, mvbw=b1vec1, mvfw=f1vec1, mvbw2=b2vec1, mvfw2=f2vec1, mvbw3=b3vec1, mvfw3=f3vec1, thsad=125)
+    mergeDiff1 = core.std.MergeDiff(clip, removeNoise)
+    
+    # limit NR1 to not do more than what "spat" would do
+    limitNoise = core.std.Expr([diffClip1, mergeDiff1], expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
+    diffClip2 = core.std.MakeDiff(clip, limitNoise)
+    
+    # 2nd MV-denoising stage. We use MVDegrain.
+    removeNoise2 = core.mv.Degrain3(diffClip2, super=suClip, mvbw=b1vec1, mvfw=f1vec1, mvbw2=b2vec1, mvfw2=f2vec1, mvbw3=b3vec1, mvfw3=f3vec1, thsad=125)
+    
+    # contra-sharpening: sharpen the denoised clip, but don't add more to any pixel than what was removed previously.
+    # (Here: a simple area-based version with relaxed restriction. The full version is more complicated.)
+    
+    # damp down remaining spots of the denoised clip
+    postBlur = minblur(removeNoise2, radius=1, planes=[0,1,2])
+    # the difference achieved by the denoising
+    postDiff = core.std.MakeDiff(clip, removeNoise2)
+    # the difference of a simple kernel blur
+    postDiff2 = core.std.MakeDiff(postBlur, core.std.Convolution(postBlur, matrix=[1, 2, 1, 2, 4, 2, 1, 2, 1]))
+    # limit the difference to the max of what the denoising removed locally.
+    postRepair = core.rgvs.Repair(postDiff2, postDiff, mode=1)
+    # abs(diff) after limiting may not be bigger than before.
+    postExpr = core.std.Expr([postRepair, postDiff2], expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
+    
+    postMerge = core.std.MergeDiff(removeNoise2, postExpr)
+    return postMerge
 
 
 def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None,
