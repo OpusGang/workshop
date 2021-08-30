@@ -540,8 +540,8 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
     y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell") # pretty sure these don't need to be set: , linearize=0, sigmoidize=0)
 
     if repair:
-        import awsmfunc as awf
-        bicubic = awf.zr(get_y(clip), width=w, height=h, kernel='bicubic', filter_param_a=0, filter_param_b=0)
+        import rgvs
+        bicubic = get_y(clip).resize.Bicubic(w, h, filter_param_a=0, filter_param_b=0)
         rep = rgvs.Repair(y, bicubic, mode=20)
         y = core.std.Expr([y, rep], expr=[f'x y < x x y - {repair[0]} * - x x y - {repair[1]} * - ?'])
 
