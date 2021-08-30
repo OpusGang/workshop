@@ -541,9 +541,10 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
 
     if repair:
         import rgvs
-        bicubic = get_y(clip).resize.Bicubic(w, h, filter_param_a=0, filter_param_b=0)
+        from vsutil import get_y
+        bicubic = get_y(clip).resize.Bicubic(w, h, filter_param_a=0, filter_param_b=0, format=y.format)
         rep = rgvs.Repair(y, bicubic, mode=20)
-        y = core.std.Expr([y, rep], expr=[f'x y < x x y - {repair[0]} * - x x y - {repair[1]} * - ?'])
+        y = core.std.Expr([y, rep], expr=[f'x y < x x y - {repair[0]} * - x x y - {repair[1]} * - ?', ''])
 
     # I hope the shifts are correctly set
     u = u.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
