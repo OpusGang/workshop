@@ -464,8 +464,8 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
         return c[0]
 
 
-def ssimdown(clip: vs.VideoNode, preset: Optional[str] = None, width: Optional[int] = None, height: Optional[int] = None,
-             left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9, 
+def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[list[int]] = None, width: Optional[int] = None,
+             height: Optional[int] = None, left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9, 
              shader_path: Optional[str] = None, shader_str: Optional[str] = None) -> vs.VideoNode:
     """
     ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
@@ -491,9 +491,9 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[str] = None, width: Optional[i
 
     if preset:
         if clip.width / clip.height > ar:
-            return ssimdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom)
+            return ssimdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom, shader_str=shader, repair=repair)
         else:
-            return ssimdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom)
+            return ssimdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom, shader_str=shader, repair=repair)
 
     if (width is None) and (height is None):
         width = clip.width
@@ -538,6 +538,12 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[str] = None, width: Optional[i
         c = 4 * [0]
 
     y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell") # pretty sure these don't need to be set: , linearize=0, sigmoidize=0)
+
+    if repair:
+        import awsmfunc as awf
+        bicubic = awf.zr(get_y(clip), width=w, height=h, kernel='bicubic', filter_param_a=0, filter_param_b=0)
+        rep = rgvs.Repair(y, bicubic, mode=20)
+        y = core.std.Expr([y, rep], expr=[f'x y < x x y - {repair[0]} * - x x y - {repair[1]} * - ?'])
 
     # I hope the shifts are correctly set
     u = u.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
