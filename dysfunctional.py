@@ -572,17 +572,19 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
 
     if repair is not None:
         import rgvs
-        from muvsfunc import AnimeMask
         from vsutil import get_y
+
+        darkstr = repair[0]
+        brightstr = repair[1]
+
 
         bicubic = get_y(clip).resize.Bicubic(width=w, height=h, format=y.format, **fun)
         rep = rgvs.Repair(y, bicubic, mode=20)
         # NSQY: clamp to 1.0...
         limit = core.std.Expr([y, rep],
-                              expr=[f'x y < x x y - {max(min(repair[0], 1.0), 0.0)} \
-                                  * - x x y - {max(min(repair[0], 1.0), 0.0)} * - ?', ''])
-        y = core.std.MaskedMerge(limit, y,
-                                 AnimeMask(limit, mode=1).std.BinarizeMask(threshold=(5 << (16 - 8))))
+                              expr=[f'x y < x x y - {max(min(darkstr, 1.0), 0.0)} \
+                                  * - x x y - {max(min(brightstr, 1.0), 0.0)} * - ?', ''])
+        y = limit
 
     # noizuy: I hope the shifts are correctly set
     # NSQY: This casues a huge amount of ringing on CbCr
