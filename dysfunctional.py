@@ -7,6 +7,8 @@ from typing import Callable, Optional, Dict, Any
 def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] = [5,0], radius: int = 3, luma_scaling: float = 12.0,
               invert: bool = False, cutoff: Optional[float] = None, divby: Optional[float] = None, **placebo_args) -> vs.VideoNode:
     from vsutil import depth, scale_value, split, join
+    import warnings
+    warnings.warn("Don't use this, it will be removed soon", DeprecationWarning)
 
     placebo: Dict[str, Any] = dict(filter='robidoux', param1=0, param2=0)
     placebo |= placebo_args
@@ -51,11 +53,10 @@ def coolgrain(clip: vs.VideoNode, strength: list[Optional[int], Optional[int]] =
     return depth(merge, bits, dither_type='none')
 
 
-def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 48,
-                planes: list[int] = [0,1,2], blksize: int = None, overlap: int = None,
+def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: int = None,
+                planes: list[int] = [0, 1, 2], blksize: int = None, overlap: int = None,
                 pel: int = None, recalc: bool = False,
                 pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None ) -> vs.VideoNode:
-    from vsutil import depth
     from zzfunc.util import vs_to_mv
     import rgvs
 
@@ -65,15 +66,26 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 
 
     Raises:
         TypeError: CoolDegrain: This is not a clip
-        ValueError: tr must be between 1 and 24
+        Warning: CoolDegrain: (32f) thSADC does not work at this depth
+        ValueError: CoolDegrain: (16i) tr must be between 1 and 3
+        ValueError: CoolDegrain: (32f) tr must be between 1 and 24
 
     Returns:
         vs.VideoNode: Denoised clip
     """
 
     if not isinstance(clip, vs.VideoNode):
-        raise TypeError('CoolDegrain: This is not a clip')
-    
+        raise TypeError('CoolDegrain: (8~16i, 32f) This is not a clip')
+
+    if clip.format.bits_per_sample <= 16 and tr not in range(1, 4):
+        raise ValueError('CoolDegrain: (8~16i) tr must be between 1 and 3')
+
+    if clip.format.bits_per_sample == 32:
+        if thSADC is not None:
+            raise Warning('CoolDegrain: (32f) thSADC does not work at this depth')
+        if tr not in range(1, 25):
+            raise ValueError('CoolDegrain: (32f) tr must be between 1 and 24')
+
     plane = vs_to_mv(planes)
 
     pfclip = pf if pf is not None else clip
@@ -97,11 +109,6 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 
             pel = 2
         else:
             pel = 1
-
-    if clip.format.bits_per_sample <= 16 and tr not in range(1, 4):
-        raise ValueError('tr must be between 1 and 3.')
-    if clip.format.bits_per_sample == 32 and tr not in range(1, 25):
-        raise ValueError('tr must be between 1 and 24.')
 
     if clip.format.bits_per_sample <= 16:
         super = core.mv.Super(pfclip, pel=pel, sharp=2, rfilter=4)
@@ -144,7 +151,7 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 
         super = core.mvsf.Super(clip, pel=pel, sharp=2, rfilter=4)
         analyse = core.mvsf.Analyze(super, radius=tr, isb=True, overlap=overlap, blksize=blksize)
 
-        # This seems more than useless, even with better prefilters (KNL, bilateral...).
+        # This seems more than useless, even with better prefilters (KNL, bilateral, ...).
         if recalc is True:
             hoverlap = overlap // 2
             hblksize = blksize // 2
@@ -161,58 +168,71 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 1, thSAD: int = 48, thSADC: int = 
     return filtered
 
 
-def unknownDideeDNR1(clip: vs.VideoNode) -> vs.VideoNode:
+def unknownDideeDNR1(clip: vs.VideoNode, 
+                     ref: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None,
+                     thSAD: int = 125,
+                     repair: int = 1) -> vs.VideoNode:
     from vsutil import scale_value
-    from rgvs import minblur
-    #https://forum.doom9.org/showthread.php?p=1076491#post1076491
+    import rgvs
+    # https://forum.doom9.org/showthread.php?p=1076491#post1076491
     # This seems to be more or less a precursor to SMDegrain
-    # Much slower (probably due to FFT3D), only slightly better
 
     neutral = scale_value(128, 8, clip.format.bits_per_sample)
 
     # Here, we simply use FFT3DFilter. There're lots of other possibilities. Basically, you shouldn't use 
     # a clip with "a tiny bit of filtering". The search clip has to be CALM. Ideally, it should be "dead calm".
-    refClip = core.fft3dfilter.FFT3DFilter(clip, sigma=16, sigma2=10, sigma3=6, sigma4=4, bt=5, bw=16, bh=16, ow=8, oh=8)
-    
+    # core.fft3dfilter.FFT3DFilter(clip, sigma=16, sigma2=10, sigma3=6, sigma4=4, bt=5, bw=16, bh=16, ow=8, oh=8)
+
+    def knl(clip: vs.VideoNode, h: int = 1, a: int = 2, s: int = 1, d: int = 2) -> vs.VideoNode:
+        knl = core.knlm.KNLMeansCL(clip, h=h, a=a, s=s, d=d, channels='Y')
+        return core.knlm.KNLMeansCL(knl, h=h, a=a, s=s, d=d, channels='UV')
+
+    refClip = ref or knl(clip)
     diffClip1 = core.std.MakeDiff(clip, refClip)
-    
+
     # motion vector search (with very basic parameters. Add your own parameters as needed.)
     suClip = core.mv.Super(refClip, pel=2, sharp=2)
-    b3vec1 = core.mv.Analyse(suClip, isb=True,  delta = 3, pelsearch = 2, overlap=4)
-    b2vec1 = core.mv.Analyse(suClip, isb=True,  delta = 2, pelsearch = 2, overlap=4)
-    b1vec1 = core.mv.Analyse(suClip, isb=True,  delta = 1, pelsearch = 2, overlap=4)
-    f1vec1 = core.mv.Analyse(suClip, isb=False, delta = 1, pelsearch = 2, overlap=4)
-    f2vec1 = core.mv.Analyse(suClip, isb=False, delta = 2, pelsearch = 2, overlap=4)
-    f3vec1 = core.mv.Analyse(suClip, isb=False, delta = 3, pelsearch = 2, overlap=4)
+    b3vec1 = core.mv.Analyse(suClip, isb=True,  delta=3, pelsearch=2, overlap=4)
+    b2vec1 = core.mv.Analyse(suClip, isb=True,  delta=2, pelsearch=2, overlap=4)
+    b1vec1 = core.mv.Analyse(suClip, isb=True,  delta=1, pelsearch=2, overlap=4)
+    f1vec1 = core.mv.Analyse(suClip, isb=False, delta=1, pelsearch=2, overlap=4)
+    f2vec1 = core.mv.Analyse(suClip, isb=False, delta=2, pelsearch=2, overlap=4)
+    f3vec1 = core.mv.Analyse(suClip, isb=False, delta=3, pelsearch=2, overlap=4)
     
     # 1st MV-denoising stage. Usually here's some temporal-median filtering going on.
     # For simplicity, we just use MVDegrain.
-    removeNoise = core.mv.Degrain3(clip, super=suClip, mvbw=b1vec1, mvfw=f1vec1, mvbw2=b2vec1, mvfw2=f2vec1, mvbw3=b3vec1, mvfw3=f3vec1, thsad=125)
+    removeNoise = core.mv.Degrain3(clip, super=suClip, mvbw=b1vec1, mvfw=f1vec1,
+                                   mvbw2=b2vec1, mvfw2=f2vec1,
+                                   mvbw3=b3vec1, mvfw3=f3vec1, thsad=thSAD)
     mergeDiff1 = core.std.MergeDiff(clip, removeNoise)
-    
+
     # limit NR1 to not do more than what "spat" would do
-    limitNoise = core.std.Expr([diffClip1, mergeDiff1], expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
+    limitNoise = core.std.Expr([diffClip1, mergeDiff1],
+                               expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
     diffClip2 = core.std.MakeDiff(clip, limitNoise)
-    
+
     # 2nd MV-denoising stage. We use MVDegrain.
-    removeNoise2 = core.mv.Degrain3(diffClip2, super=suClip, mvbw=b1vec1, mvfw=f1vec1, mvbw2=b2vec1, mvfw2=f2vec1, mvbw3=b3vec1, mvfw3=f3vec1, thsad=125)
-    
+    removeNoise2 = core.mv.Degrain3(diffClip2, super=suClip, mvbw=b1vec1, mvfw=f1vec1,
+                                    mvbw2=b2vec1, mvfw2=f2vec1,
+                                    mvbw3=b3vec1, mvfw3=f3vec1, thsad=thSAD)
+
     # contra-sharpening: sharpen the denoised clip, but don't add more to any pixel than what was removed previously.
     # (Here: a simple area-based version with relaxed restriction. The full version is more complicated.)
-    
+
     # damp down remaining spots of the denoised clip
-    postBlur = minblur(removeNoise2, radius=1, planes=[0,1,2])
+    postBlur = rgvs.minblur(removeNoise2, radius=1, planes=[0,1,2])
     # the difference achieved by the denoising
     postDiff = core.std.MakeDiff(clip, removeNoise2)
     # the difference of a simple kernel blur
-    postDiff2 = core.std.MakeDiff(postBlur, core.std.Convolution(postBlur, matrix=[1, 2, 1, 2, 4, 2, 1, 2, 1]))
+    postDiff2 = core.std.MakeDiff(postBlur, core.std.Convolution(postBlur,
+                                                                 matrix=[1, 2, 1, 2, 4, 2, 1, 2, 1]))
     # limit the difference to the max of what the denoising removed locally.
-    postRepair = core.rgvs.Repair(postDiff2, postDiff, mode=1)
+    postRepair = rgvs.repair(postDiff2, postDiff, mode=repair, planes=[0,1,2])
     # abs(diff) after limiting may not be bigger than before.
-    postExpr = core.std.Expr([postRepair, postDiff2], expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
+    postExpr = core.std.Expr([postRepair, postDiff2],
+                             expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
 
-    postMerge = core.std.MergeDiff(removeNoise2, postExpr)
-    return postMerge
+    return core.std.MergeDiff(removeNoise2, postExpr)
 
 
 def horribleDNR(clip: vs.VideoNode, prefilter: Optional[vs.VideoNode] = None,
@@ -335,11 +355,11 @@ def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blu
     if top:
         refh.append(clip.std.Crop(bottom=clip.height - top))
         flth.append(cf.std.Crop(bottom=clip.height - top))
-        
+
     if bottom:
         refh.append(clip.std.Crop(top=clip.height - bottom - 1))
         flth.append(cf.std.Crop(top=clip.height - bottom - 1))
-         
+
     if left:
         refv.append(clip.std.Crop(right=clip.width - left))
         fltv.append(cf.std.Crop(right=clip.width - left))
@@ -464,15 +484,19 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
         return c[0]
 
 
-def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[list[int]] = None, width: Optional[int] = None,
+def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[list[float]] = None, width: Optional[int] = None,
              height: Optional[int] = None, left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9, 
-             shader_path: Optional[str] = None, shader_str: Optional[str] = None) -> vs.VideoNode:
+             shader_path: Optional[str] = None, shader_str: Optional[str] = None, repair_fun: Optional[Dict[str, Any]] = None) -> vs.VideoNode:
     """
     ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
     only works with 420 atm since 444 would probably add krigbilateral to the mix
     """
     from vsutil import depth, split, join
     import math
+
+    fun: Dict[str, Any] = dict(filter_param_a=0, filter_param_b=0)
+    if repair_fun is not None:
+        fun |= repair_fun
 
     if not shader_str:
         if shader_path:
@@ -486,21 +510,23 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
     else:
         shader = shader_str
 
-    if preset == width == height == None:
+    if preset == width == height is not None:
         preset = 1080
 
     if preset:
         if clip.width / clip.height > ar:
-            return ssimdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom, shader_str=shader, repair=repair)
+            return ssimdown(clip, width=ar * preset, left=left, right=right, top=top, bottom=bottom,
+                            shader_str=shader, repair=repair, repair_fun=repair_fun)
         else:
-            return ssimdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom, shader_str=shader, repair=repair)
+            return ssimdown(clip, height=preset, left=left, right=right, top=top, bottom=bottom,
+                            shader_str=shader, repair=repair, repair_fun=repair_fun)
 
     if (width is None) and (height is None):
         width = clip.width
         height = clip.height
         rh = rw = 1
     elif width is None:
-        rh = rw = height / (clip.height - top - bottom) 
+        rh = rw = height / (clip.height - top - bottom)
     elif height is None:
         rh = rw = width / (clip.width - left - right)
     else:
@@ -537,17 +563,34 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
     else:
         c = 4 * [0]
 
-    y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell") # pretty sure these don't need to be set: , linearize=0, sigmoidize=0)
+    # noizuy: pretty sure these don't need to be set: linearize=0, sigmoidize=0)
+    # NSQY: As of writing (vs-|lib)placebo is not performing Y'CbCr -> linear RGB conversion for linearize,
+    # to use these paramiters, the input clip must be RGB. Default transfer (trc) is probably not what we want.
 
-    if repair:
+    # igv: Tuned for use with dscale=mitchell and linear-downscaling=no.
+    y = clip.placebo.Shader(shader_s=shader, width=w, height=h, filter="mitchell")
+
+    if repair is not None:
         import rgvs
+        from muvsfunc import AnimeMask
         from vsutil import get_y
-        bicubic = get_y(clip).resize.Bicubic(w, h, filter_param_a=0, filter_param_b=0, format=y.format)
-        rep = rgvs.Repair(y, bicubic, mode=20)
-        y = core.std.Expr([y, rep], expr=[f'x y < x x y - {repair[0]} * - x x y - {repair[1]} * - ?', ''])
 
-    # I hope the shifts are correctly set
-    u = u.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2], src_height=u.height - c[2] - c[3])
-    v = v.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=v.width - c[0] - c[1], src_top=c[2], src_height=v.height - c[2] - c[3])
+        bicubic = get_y(clip).resize.Bicubic(width=w, height=h, format=y.format, **fun)
+        rep = rgvs.Repair(y, bicubic, mode=20)
+        # NSQY: clamp to 1.0...
+        limit = core.std.Expr([y, rep],
+                              expr=[f'x y < x x y - {max(min(repair[0], 1.0), 0.0)} \
+                                  * - x x y - {max(min(repair[0], 1.0), 0.0)} * - ?', ''])
+        y = core.std.MaskedMerge(limit, y,
+                                 AnimeMask(limit, mode=1).std.BinarizeMask(threshold=(5 << (16 - 8))))
+
+    # noizuy: I hope the shifts are correctly set
+    # NSQY: This casues a huge amount of ringing on CbCr
+    # don't use this on media with finely detailed chroma...
+    # repair could be done after shifting
+    u = u.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=u.width - c[0] - c[1], src_top=c[2],
+                          src_height=u.height - c[2] - c[3])
+    v = v.resize.Spline36(w / 2, h / 2, src_left=shift + c[0], src_width=v.width - c[0] - c[1], src_top=c[2],
+                          src_height=v.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind)
