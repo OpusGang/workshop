@@ -4,6 +4,7 @@ core = vs.core
 from typing import Callable, Optional, Dict, Any
 from vsutil import get_y, depth, Range, scale_value, split, join
 
+
 def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Optional[int] = None,
                 planes: list[int] = [0, 1, 2], blksize: Optional[int] = None,
                 overlap: Optional[int] = None, pel: Optional[int] = None, recalc: bool = False,
@@ -486,3 +487,36 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
                           src_height=v.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind)
+
+
+def f32kdb(clip, range=15, y=32, cb=0, cr=0, sample_mode=4, dither="none"):
+    """
+    just an easier to read version of vardefunc's dumb3kdb with minor changes:
+    * grain is always 0
+    * changed defaults
+    * clips are merged at 32-bit
+    * you can also just pass a 32-bit clip (Idc if this is slower or something)
+    """
+    from vsutil import depth
+    # 16 for sample_mode = 2
+    # 32 for rest
+    step = 16 if sample_mode == 2 else 32
+    
+    odepth = max(clip.format.bits_per_sample, 16)
+    clip = depth(clip, 16, dither_type="none")
+    
+    if y % step == cb % step == cr % step == 0:
+        return depth(clip.neo_f3kdb.Deband(range, y, cb, cr, 0, 0, sample_mode), odepth)
+    else:
+        loy, locb, locr = [max((th - 1) // step * step + 1, 0) for th in [y, cb, cr]]
+        hiy, hicb, hicr = [min(lo + step, 511) for lo in [loy, locb, locr]]
+
+        lo_clip = depth(clip.neo_f3kdb.Deband(range, loy, locb, locr, 0, 0, sample_mode), 32)
+        hi_clip = depth(clip.neo_f3kdb.Deband(range, hiy, hicb, hicr, 0, 0, sample_mode), 32)
+
+        if clip.format.color_family == vs.GRAY:
+            weight = (y - loy) / step
+        else:
+            weight = [(y - loy) / step, (cb - locb) / step, (cr - locr) / step]
+
+        return depth(core.std.Merge(lo_clip, hi_clip, weight), odepth, dither_type=dither)
