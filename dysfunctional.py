@@ -1,14 +1,14 @@
+from functools import partial
 import vapoursynth as vs
 core = vs.core
 
 from typing import Callable, Optional, Dict, Any
 from vsutil import get_y, depth, Range, scale_value, split, join
 
-
 def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Optional[int] = None,
                 planes: list[int] = [0, 1, 2], blksize: Optional[int] = None,
                 overlap: Optional[int] = None, pel: Optional[int] = None, recalc: bool = False,
-                pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None ) -> vs.VideoNode:
+                pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
     from zzfunc.util import vs_to_mv
     import rgvs
 
@@ -65,7 +65,11 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
         else:
             pel = 1
 
-    if clip.format.bits_per_sample <= 16:
+    def _CoolDegrain16(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Optional[int] = None,
+                planes: list[int] = [0, 1, 2], blksize: Optional[int] = None,
+                overlap: Optional[int] = None, pel: Optional[int] = None, recalc: bool = False,
+                pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
+
         super = core.mv.Super(pfclip, pel=pel, sharp=2, rfilter=4)
 
         # at least tr=1, so no checks here
@@ -74,6 +78,7 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
         if tr >= 2:
             mvbw2 = core.mv.Analyse(super, isb=True, delta=2, overlap=overlap, blksize=blksize)
             mvfw2 = core.mv.Analyse(super, isb=False, delta=2, overlap=overlap, blksize=blksize)
+
         if tr >= 3:
             mvbw3 = core.mv.Analyse(super, isb=True, delta=3, overlap=overlap, blksize=blksize)
             mvfw3 = core.mv.Analyse(super, isb=False, delta=3, overlap=overlap, blksize=blksize)
@@ -83,14 +88,16 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
             hblksize = blksize // 2
             hthsad = thSAD // 2
 
-            prefilt = core.rgvs.RemoveGrain(clip, 4)
+            prefilt = rgvs.RemoveGrain(clip, mode=4, planes=plane)
             super_r = core.mv.Super(prefilt, pel=pel, sharp=2, rfilter=4)
 
             mvbw1 = core.mv.Recalculate(super_r, mvbw1, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
             mvfw1 = core.mv.Recalculate(super_r, mvfw1, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+
             if tr >= 2:
                 mvbw2 = core.mv.Recalculate(super_r, mvbw2, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
                 mvfw2 = core.mv.Recalculate(super_r, mvfw2, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
+
             if tr >= 3:
                 mvbw3 = core.mv.Recalculate(super_r, mvbw3, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
                 mvfw3 = core.mv.Recalculate(super_r, mvfw3, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
@@ -101,8 +108,14 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
             filtered = core.mv.Degrain2(clip=clip, super=super, mvbw=mvbw1, mvfw=mvfw1, mvbw2=mvbw2, mvfw2=mvfw2, thsad=thSAD, thsadc=thSADC, plane=plane)
         elif tr == 3:
             filtered = core.mv.Degrain3(clip=clip, super=super, mvbw=mvbw1, mvfw=mvfw1, mvbw2=mvbw2, mvfw2=mvfw2, mvbw3=mvbw3, mvfw3=mvfw3, thsad=thSAD, thsadc=thSADC, plane=plane)
+        return filtered
 
-    else:
+
+    def _CoolDegrain32(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Optional[int] = None,
+                planes: list[int] = [0, 1, 2], blksize: Optional[int] = None,
+                overlap: Optional[int] = None, pel: Optional[int] = None, recalc: bool = False,
+                pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
+
         super = core.mvsf.Super(clip, pel=pel, sharp=2, rfilter=4)
         analyse = core.mvsf.Analyze(super, radius=tr, isb=True, overlap=overlap, blksize=blksize)
 
@@ -119,12 +132,18 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
         # Unforunately, we cannot make use of thSADC at this depth.
         # I don't generally recommend mvtools for chroma processing anyway.
         filtered = core.mvsf.Degrain(clip, super, analyse, thsad=thSAD, plane=plane, limit=1)
+        return filtered
 
 
-    return filtered
+    if clip.format.bits_per_sample <= 16:
+        return _CoolDegrain16(clip=clip, tr=tr, thSAD=thSAD, thSADC=thSADC, planes=planes,
+                              blksize=blksize, overlap=overlap, pel=pel, recalc=recalc, pf=pf)
+    else:
+        return _CoolDegrain32(clip=clip, tr=tr, thSAD=thSAD, thSADC=thSADC, planes=planes,
+                        blksize=blksize, overlap=overlap, pel=pel, recalc=recalc, pf=pf)
 
 
-def unknownDideeDNR1(clip: vs.VideoNode, 
+def unknownDideeDNR1(clip: vs.VideoNode,
                      ref: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None,
                      thSAD: int = 125,
                      repair: int = 1) -> vs.VideoNode:
@@ -159,7 +178,7 @@ def unknownDideeDNR1(clip: vs.VideoNode,
     f1vec1 = core.mv.Analyse(suClip, isb=False, delta=1, pelsearch=2, overlap=4)
     f2vec1 = core.mv.Analyse(suClip, isb=False, delta=2, pelsearch=2, overlap=4)
     f3vec1 = core.mv.Analyse(suClip, isb=False, delta=3, pelsearch=2, overlap=4)
-    
+
     # 1st MV-denoising stage. Usually here's some temporal-median filtering going on.
     # For simplicity, we just use MVDegrain.
     removeNoise = core.mv.Degrain3(clip, super=suClip, mvbw=b1vec1, mvfw=f1vec1,
@@ -213,7 +232,8 @@ def retinex(clip: vs.VideoNode, mask: Callable[[vs.VideoNode], vs.VideoNode],
 
     if clip.format.bits_per_sample == 32: 
 
-        def resample(clip: vs.VideoNode, function: Callable[[vs.VideoNode], vs.VideoNode], dither_type: str = 'none') -> vs.VideoNode:
+        def resample(clip: vs.VideoNode, function: Callable[[vs.VideoNode], vs.VideoNode],
+                     dither_type: str = 'none') -> vs.VideoNode:
             # Copy paste stolen code from lvsfunc but forced rounding
 
             down = depth(clip, 16, dither_type=dither_type)
@@ -231,8 +251,34 @@ def retinex(clip: vs.VideoNode, mask: Callable[[vs.VideoNode], vs.VideoNode],
     return depth(core.std.Expr([mask, tcanny], f'x y + {max_value} min'), clip.format.bits_per_sample, dither_type='none')
 
 
+def cambi(clip: vs.VideoNode,
+        filter: vs.VideoNode,
+        thr: float = 5,
+        cambi_args: Optional[Dict[str, Any]] = None,
+        debug: bool = False) -> vs.VideoNode:
+
+    cambi_dict: Dict[str, Any] = dict(topk=0.0001, window_size=32)
+    if cambi_args is not None:
+        cambi_dict |= cambi_args
+
+    def _fun(n, f, clip, filter):
+        return filter if f.props['CAMBI'] > thr else clip
+
+    ref = depth(clip, 10, dither_type='ordered') \
+        if clip.format.bits_per_sample > 10 else clip
+
+    cambi = core.akarin.Cambi(ref, **cambi_dict)
+    process = core.std.FrameEval(clip, partial(_fun, clip=clip, filter=filter), cambi)
+
+    if debug is True:
+        props = core.std.CopyFrameProps(process, prop_src=cambi)
+        return core.text.FrameProps(props, props="CAMBI")
+
+    return process
+
+
 def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blur=999):
-    
+
     clip = depth(clip, 16)
     radius = max([top, bottom, left, right]) * 2
     cf = clip.cf.ContinuityFixer(top=top, bottom=bottom, left=left, right=right, radius=radius)
@@ -294,7 +340,7 @@ def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blu
 
 def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999, scale_thr=True, planes=None):
     import math
-    
+
     if scale_thr:
         thr = scale_value(thr, 8, 16)
     if planes is None:
@@ -375,7 +421,7 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
 
 
 def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[list[float]] = None, width: Optional[int] = None,
-             height: Optional[int] = None, left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9, 
+             height: Optional[int] = None, left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9,
              shader_path: Optional[str] = None, shader_str: Optional[str] = None, repair_fun: Optional[Dict[str, Any]] = None) -> vs.VideoNode:
     """
     ssimdownscaler wrapper to resize chroma with spline36 and optional (hopefully working) side cropping
@@ -456,7 +502,7 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
     # NSQY: As of writing (vs-|lib)placebo is not performing Y'CbCr -> linear RGB conversion,
     # See: https://github.com/Lypheo/vs-placebo/commit/ca73796ae214f6974cee01fb50c0a56a42806c80
     # To use these paramiters, the input clip must be RGB or GRAY. Default transfer (trc) is probably not what we want.
-    
+
     # // Outdated info, Linearize/Sigmoidize works on Y'CbCr for placebo.Shader but not placebo.Resample
     # // leaving here as a reference, probably an oversight
 
@@ -487,36 +533,3 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
                           src_height=v.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind)
-
-
-def f32kdb(clip, range=15, y=32, cb=0, cr=0, sample_mode=4, dither="none"):
-    """
-    just an easier to read version of vardefunc's dumb3kdb with minor changes:
-    * grain is always 0
-    * changed defaults
-    * clips are merged at 32-bit
-    * you can also just pass a 32-bit clip (Idc if this is slower or something)
-    """
-    from vsutil import depth
-    # 16 for sample_mode = 2
-    # 32 for rest
-    step = 16 if sample_mode == 2 else 32
-    
-    odepth = max(clip.format.bits_per_sample, 16)
-    clip = depth(clip, 16, dither_type="none")
-    
-    if y % step == cb % step == cr % step == 0:
-        return depth(clip.neo_f3kdb.Deband(range, y, cb, cr, 0, 0, sample_mode), odepth)
-    else:
-        loy, locb, locr = [max((th - 1) // step * step + 1, 0) for th in [y, cb, cr]]
-        hiy, hicb, hicr = [min(lo + step, 511) for lo in [loy, locb, locr]]
-
-        lo_clip = depth(clip.neo_f3kdb.Deband(range, loy, locb, locr, 0, 0, sample_mode), 32)
-        hi_clip = depth(clip.neo_f3kdb.Deband(range, hiy, hicb, hicr, 0, 0, sample_mode), 32)
-
-        if clip.format.color_family == vs.GRAY:
-            weight = (y - loy) / step
-        else:
-            weight = [(y - loy) / step, (cb - locb) / step, (cr - locr) / step]
-
-        return depth(core.std.Merge(lo_clip, hi_clip, weight), odepth, dither_type=dither)
