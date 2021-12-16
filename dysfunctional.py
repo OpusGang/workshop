@@ -251,28 +251,80 @@ def retinex(clip: vs.VideoNode, mask: Callable[[vs.VideoNode], vs.VideoNode],
     return depth(core.std.Expr([mask, tcanny], f'x y + {max_value} min'), clip.format.bits_per_sample, dither_type='none')
 
 
-def cambi(clip: vs.VideoNode,
+def Cambi(clip: vs.VideoNode,
         filter: vs.VideoNode,
-        thr: float = 5,
+        thr: float = 5.0,
         cambi_args: Optional[Dict[str, Any]] = None,
         debug: bool = False) -> vs.VideoNode:
 
-    cambi_dict: Dict[str, Any] = dict(topk=0.0001, window_size=32)
+    cambi_dict: Dict[str, Any] = dict(topk=0.001)
     if cambi_args is not None:
         cambi_dict |= cambi_args
 
     def _fun(n, f, clip, filter):
         return filter if f.props['CAMBI'] > thr else clip
 
-    ref = depth(clip, 10, dither_type='ordered') \
-        if clip.format.bits_per_sample > 10 else clip
+    ref = depth(clip, 8, dither_type='ordered') \
+        if clip.format.bits_per_sample > 8 else clip
+    # Maybe we can use our own prefilter to get more consistent scores
+    # I'm pretty concerned about the potential for 'flickering'
+    # from rgvs import blur
+    # rgvs.blur(radius=2): Output 1001 frames in 2.25 seconds (444.40 fps)
+    # Convolution [9]*9: Output 1001 frames in 2.11 seconds (475.48 fps)
+    # Convolution [9]*25: Output 1001 frames in 3.59 seconds (279.10 fps)
 
     cambi = core.akarin.Cambi(ref, **cambi_dict)
     process = core.std.FrameEval(clip, partial(_fun, clip=clip, filter=filter), cambi)
+    # pass props to clip
+    props = core.std.CopyFrameProps(clip, prop_src=cambi)
 
     if debug is True:
         props = core.std.CopyFrameProps(process, prop_src=cambi)
         return core.text.FrameProps(props, props="CAMBI")
+
+    return props
+
+
+def AutoDeband(clip: vs.VideoNode,
+                thr: float = 5.0,
+                cambi_args: Optional[Dict[str, Any]] = None,
+                debug: bool = False) -> vs.VideoNode:
+    from debandshit.debanders import f3kpf
+    from vsutil import depth
+    import vardefunc.mask as vmask
+
+    cambi_dict: Dict[str, Any] = dict(topk=0.001)
+    if cambi_args is not None:
+        cambi_dict |= cambi_args
+
+    def _fun(n, f, clip, filter):
+        return filter if f.props['CAMBI'] > thr else clip
+
+    def _f3kdb(n, f, clip):
+        def deband(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+            mask = vmask.Kirsch().get_mask(vsutil.get_y(clip))
+            deband = f3kpf(clip, threshold=sorted((15, threshold, 64))[1],
+                    f3kdb_args=dict(use_neo=True, sample_mode=4))
+
+            return core.std.MaskedMerge(deband, clip, mask)
+
+        deband = deband(clip, threshold=int(f.props['CAMBI']) * 2)
+        return depth(deband, clip.format.bits_per_sample)
+
+    ref = depth(clip, 8, dither_type='ordered') \
+        if clip.format.bits_per_sample > 8 else clip
+
+    cambi = core.akarin.Cambi(ref, **cambi_dict)
+    # pass props to clip
+    props = core.std.CopyFrameProps(clip, prop_src=cambi)
+
+    f3kdb = core.std.FrameEval(clip, partial(_f3kdb, clip=props), props)
+    process = core.std.FrameEval(clip, partial(_fun, clip=clip, filter=f3kdb), props)
+
+    if debug is True:
+        # copy again ... why are props lost after eval?
+        process = core.std.CopyFrameProps(process, prop_src=cambi)
+        return core.text.FrameProps(process, props="CAMBI")
 
     return process
 
