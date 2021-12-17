@@ -289,9 +289,9 @@ def AutoDeband(clip: vs.VideoNode,
                 thr: int | float = 10.0,
                 f3kdb_scale: int | float = 1.2,
                 grainer: None | bool | vs.VideoNode = None,
-                cambi_args: None | dict | str = None,
+                cambi_args: None | dict = None,
                 debug: bool = False) -> vs.VideoNode:
-    from debandshit.debanders import f3kpf
+    from debandshit.debanders import f3kpf, dumb3kdb
     from lvsfunc.mask import detail_mask
 
     from rgvs import Blur
@@ -301,14 +301,20 @@ def AutoDeband(clip: vs.VideoNode,
 
         def _noisefactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
             from havsfunc import GrainFactory3
-            return GrainFactory3(clip, g1str=threshold/45, g2str=threshold/40,
-                                 g3str=0, temp_avg=66)
+            from adptvgrnMod import adptvgrnMod
+
+            return adptvgrnMod(clip, lo=18, grainer=lambda g:
+                GrainFactory3(g, g1str=threshold/100, g2str=threshold/100,
+                              temp_avg=66))
 
         mask_pre = Blur(get_y(ref))
         mask = detail_mask(mask_pre, sigma=False, rad=5)
         deband = f3kpf(ref,
                        threshold=threshold,
                        f3kdb_args=dict(use_neo=True, sample_mode=4))
+        # Maybe add another paramiter for a seconadry f3kdb pass?
+        # Weaker, to help with banding that f3kpf cannot see
+        # deband = dumb3kdb(deband, threshold=int(threshold / 1.5), sample_mode=4, use_neo=True)
         merge = core.std.MaskedMerge(deband, ref, mask)
 
         if grainer is False:
@@ -328,8 +334,10 @@ def AutoDeband(clip: vs.VideoNode,
         f3kdb_stat = sorted((0, int(f.props['CAMBI'] * f3kdb_scale), 40))[1] \
             if f.props['CAMBI'] > thr else 0
 
-        clip = core.std.SetFrameProp(clip, prop="f3kdb_thr",
-                                     intval=f3kdb_stat)
+        props = ["f3kdb_thr", "g1str", "g2str"]
+        vals = [f3kdb_stat, f3kdb_stat / 60, f3kdb_stat / 50]
+        for (prop, val) in zip(props, vals):
+            clip = core.std.SetFrameProp(clip, prop=prop, floatval=val)
 
         if f.props['CAMBI'] > thr:
             return _deband(clip, threshold=f3kdb_stat)
@@ -345,7 +353,7 @@ def AutoDeband(clip: vs.VideoNode,
     process = core.std.FrameEval(clip, partial(_fun, clip=props), props)
 
     if debug is True:
-        return core.text.FrameProps(process, props=["CAMBI", "f3kdb_thr"])
+        return core.text.FrameProps(process, props=["CAMBI", "f3kdb_thr", "g1str", "g2str"])
 
     return process
 
