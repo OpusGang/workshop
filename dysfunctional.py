@@ -286,16 +286,23 @@ def Cambi(clip: vs.VideoNode,
 
 
 def AutoDeband(clip: vs.VideoNode,
-                thr: float = 15.0,
-                f3kdb_scale: float = 1.2,
-                cambi_args: Optional[Dict[str, Any]] = None,
+                thr: int | float = 10.0,
+                f3kdb_scale: int | float = 1.2,
+                grainer: None | bool | vs.VideoNode = None,
+                cambi_args: None | dict | str = None,
                 debug: bool = False) -> vs.VideoNode:
     from debandshit.debanders import f3kpf
     from lvsfunc.mask import detail_mask
+
     from rgvs import Blur
 
     def _deband(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
         ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
+
+        def _noisefactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+            from havsfunc import GrainFactory3
+            return GrainFactory3(clip, g1str=threshold/45, g2str=threshold/40,
+                                 g3str=0, temp_avg=66)
 
         mask_pre = Blur(get_y(ref))
         mask = detail_mask(mask_pre, sigma=False, rad=5)
@@ -303,6 +310,12 @@ def AutoDeband(clip: vs.VideoNode,
                        threshold=threshold,
                        f3kdb_args=dict(use_neo=True, sample_mode=4))
         merge = core.std.MaskedMerge(deband, ref, mask)
+
+        if grainer is False:
+            return depth(merge, clip.format.bits_per_sample)
+        else:
+            merge = grainer(merge) if grainer is not None \
+            else _noisefactory(merge, threshold=threshold)
         return depth(merge, clip.format.bits_per_sample)
 
     cambi_dict: Dict[str, Any] = dict(topk=0.001)
