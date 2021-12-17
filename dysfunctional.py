@@ -286,30 +286,42 @@ def Cambi(clip: vs.VideoNode,
 
 
 def AutoDeband(clip: vs.VideoNode,
-                thr: float = 5.0,
+                thr: float = 15.0,
+                f3kdb_scale: float = 1.2,
                 cambi_args: Optional[Dict[str, Any]] = None,
                 debug: bool = False) -> vs.VideoNode:
     from debandshit.debanders import f3kpf
-    from vsutil import depth
-    import vardefunc.mask as vmask
+    from lvsfunc.mask import detail_mask
+    from rgvs import Blur
+
+    def _deband(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+        ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
+
+        mask_pre = Blur(get_y(ref))
+        mask = detail_mask(mask_pre, sigma=False, rad=5)
+        deband = f3kpf(ref,
+                       threshold=threshold,
+                       f3kdb_args=dict(use_neo=True, sample_mode=4))
+        merge = core.std.MaskedMerge(deband, ref, mask)
+        return depth(merge, clip.format.bits_per_sample)
 
     cambi_dict: Dict[str, Any] = dict(topk=0.001)
     if cambi_args is not None:
         cambi_dict |= cambi_args
 
-    def _fun(n, f, clip, filter):
-        return filter if f.props['CAMBI'] > thr else clip
+    def _fun(n, f, clip):
+        # is there a better way to return f3kdb values?
+        # should we apply an offset?
+        f3kdb_stat = sorted((0, int(f.props['CAMBI'] * f3kdb_scale), 40))[1] \
+            if f.props['CAMBI'] > thr else 0
 
-    def _f3kdb(n, f, clip):
-        def deband(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
-            mask = vmask.Kirsch().get_mask(vsutil.get_y(clip))
-            deband = f3kpf(clip, threshold=sorted((15, threshold, 64))[1],
-                    f3kdb_args=dict(use_neo=True, sample_mode=4))
+        clip = core.std.SetFrameProp(clip, prop="f3kdb_thr",
+                                     intval=f3kdb_stat)
 
-            return core.std.MaskedMerge(deband, clip, mask)
-
-        deband = deband(clip, threshold=int(f.props['CAMBI']) * 2)
-        return depth(deband, clip.format.bits_per_sample)
+        if f.props['CAMBI'] > thr:
+            return _deband(clip, threshold=f3kdb_stat)
+        else:
+            return clip
 
     ref = depth(clip, 8, dither_type='ordered') \
         if clip.format.bits_per_sample > 8 else clip
@@ -317,14 +329,10 @@ def AutoDeband(clip: vs.VideoNode,
     cambi = core.akarin.Cambi(ref, **cambi_dict)
     # pass props to clip
     props = core.std.CopyFrameProps(clip, prop_src=cambi)
-
-    f3kdb = core.std.FrameEval(clip, partial(_f3kdb, clip=props), props)
-    process = core.std.FrameEval(clip, partial(_fun, clip=clip, filter=f3kdb), props)
+    process = core.std.FrameEval(clip, partial(_fun, clip=props), props)
 
     if debug is True:
-        # copy again ... why are props lost after eval?
-        process = core.std.CopyFrameProps(process, prop_src=cambi)
-        return core.text.FrameProps(process, props="CAMBI")
+        return core.text.FrameProps(process, props=["CAMBI", "f3kdb_thr"])
 
     return process
 
