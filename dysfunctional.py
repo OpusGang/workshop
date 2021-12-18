@@ -12,7 +12,8 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
     from zzfunc.util import vs_to_mv
     import rgvs
 
-    """Fairly sure this originates from Beatrice-Raws
+    """
+    Fairly sure this originates from Beatrice-Raws
     Ostensibly, this is a simplified version of SMDegrain;
     Can result in lesser quality output despite the additional percision.
     One downside to the current implementation is that when applied to Y'CbCr content
@@ -293,7 +294,6 @@ def AutoDeband(clip: vs.VideoNode,
                 debug: bool = False) -> vs.VideoNode:
     from debandshit.debanders import f3kpf, dumb3kdb
     from lvsfunc.mask import detail_mask
-
     from rgvs import Blur
 
     def _deband(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
@@ -309,6 +309,7 @@ def AutoDeband(clip: vs.VideoNode,
 
         mask_pre = Blur(get_y(ref))
         mask = detail_mask(mask_pre, sigma=False, rad=5)
+        # why is this shit so slow
         deband = f3kpf(ref,
                        threshold=threshold,
                        f3kdb_args=dict(use_neo=True, sample_mode=4))
@@ -335,7 +336,7 @@ def AutoDeband(clip: vs.VideoNode,
             if f.props['CAMBI'] > thr else 0
 
         props = ["f3kdb_thr", "g1str", "g2str"]
-        vals = [f3kdb_stat, f3kdb_stat / 60, f3kdb_stat / 50]
+        vals = [f3kdb_stat, f3kdb_stat/100, f3kdb_stat/100]
         for (prop, val) in zip(props, vals):
             clip = core.std.SetFrameProp(clip, prop=prop, floatval=val)
 
