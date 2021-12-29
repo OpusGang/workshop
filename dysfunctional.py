@@ -286,75 +286,149 @@ def Cambi(clip: vs.VideoNode,
     return props
 
 
-def AutoDeband(clip: vs.VideoNode,
-                thr: int | float = 10.0,
+def autoDeband(clip: vs.VideoNode,
+                thr: int | float | tuple | list = (10.0, None),
+                f3kdb_range: tuple | list  = (12, 48),
+                f3kdb_step: int | float = 6,
                 f3kdb_scale: int | float = 1.2,
                 grainer: None | bool | vs.VideoNode = None,
                 cambi_args: None | dict = None,
                 debug: bool = False) -> vs.VideoNode:
+    """Automated banding detection and filtration via the use of CAMBI
+    Example range of values can be returned in your terminal:
+        python -c 'print(*range(12, 48, 6))' = 12 18 24 30 36 42
+
+    Args:
+        clip (vs.VideoNode): Input clip
+        thr (float | tuple): Threshold for detection. Defaults to (10.0, None).
+        f3kdb_range (tuple | list): Lower and upper bound of f3kdb strength.
+            Defaults to (12, 48).
+        f3kdb_step (int | float): Granularity of f3kdb values. Defaults to 6.
+        f3kdb_scale (int | float): Multiplication of CAMBI score.
+            higher values will result in a stronger median f3dkb scrength.
+                Defaults to 1.2.
+        grainer (None | bool | vs.VideoNode): Grain application after debanding.
+            Strength is CAMBI * fk3db_scale / 100. False to disable.
+                Custom grain function should support i16 input Defaults to None.
+        cambi_args (None | dict): Pass arguments to akarin.Cambi
+            https://github.com/AkarinVS/vapoursynth-plugin/wiki/CAMBI.
+                Defaults to None.
+        debug (bool): Show relevant frame properties. Defaults to False.
+
+    Returns:
+        vs.VideoNode: [description]
+    """
     from debandshit.debanders import f3kpf, dumb3kdb
     from lvsfunc.mask import detail_mask
+    from lvsfunc.util import get_prop
     from rgvs import Blur
+    import numpy as np
 
-    def _deband(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
-        ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
-
-        def _noisefactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
-            from havsfunc import GrainFactory3
-            from adptvgrnMod import adptvgrnMod
-
-            return adptvgrnMod(clip, lo=18, grainer=lambda g:
-                GrainFactory3(g, g1str=threshold/100, g2str=threshold/100,
-                              temp_avg=66))
-
-        mask_pre = Blur(get_y(ref))
-        mask = detail_mask(mask_pre, sigma=False, rad=5)
-        # why is this shit so slow
-        deband = f3kpf(ref,
-                       threshold=threshold,
-                       f3kdb_args=dict(use_neo=True, sample_mode=4))
-        # Maybe add another paramiter for a seconadry f3kdb pass?
-        # Weaker, to help with banding that f3kpf cannot see
-        # deband = dumb3kdb(deband, threshold=int(threshold / 1.5), sample_mode=4, use_neo=True)
-        merge = core.std.MaskedMerge(deband, ref, mask)
-
-        if grainer is False:
-            return depth(merge, clip.format.bits_per_sample)
-        else:
-            merge = grainer(merge) if grainer is not None \
-            else _noisefactory(merge, threshold=threshold)
-        return depth(merge, clip.format.bits_per_sample)
+    if not isinstance(thr, tuple | list):
+        thr = (thr, None)
 
     cambi_dict: Dict[str, Any] = dict(topk=0.001)
     if cambi_args is not None:
         cambi_dict |= cambi_args
 
-    def _fun(n, f, clip):
-        # is there a better way to return f3kdb values?
-        # should we apply an offset?
-        f3kdb_stat = sorted((0, int(f.props['CAMBI'] * f3kdb_scale), 40))[1] \
-            if f.props['CAMBI'] > thr else 0
+    def _noiseFactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+        from havsfunc import GrainFactory3
+        from adptvgrnMod import adptvgrnMod
+        return adptvgrnMod(clip, lo=18, grainer=lambda g:
+            GrainFactory3(g, g1str=threshold/100, g2str=threshold/100,
+                          temp_avg=66, seed=422))
+    # maybe we should also define our own debanding function rather than using debandshit
+    # it would be nice to (optionally) use placebo.Deband.
+    def _debandFactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+        ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
 
-        props = ["f3kdb_thr", "g1str", "g2str"]
-        vals = [f3kdb_stat, f3kdb_stat/100, f3kdb_stat/100]
-        for (prop, val) in zip(props, vals):
-            clip = core.std.SetFrameProp(clip, prop=prop, floatval=val)
+        mask_pre = Blur(get_y(ref))
+        mask = detail_mask(mask_pre, sigma=False, rad=5)
+        deband = f3kpf(ref,
+                       threshold=threshold,
+                       f3kdb_args=dict(use_neo=True, sample_mode=4))
 
-        if f.props['CAMBI'] > thr:
-            return _deband(clip, threshold=f3kdb_stat)
-        else:
-            return clip
+        if thr[1] not in (None, 0) and threshold >= thr[1]:
+            # using a stronger mask for the second pass
+            extra_mask = detail_mask(mask_pre, sigma=False, rad=5)
+            extra_deband = dumb3kdb(deband, threshold=int(threshold / f3kdb_scale),
+                                    use_neo=True, sample_mode=4)
+            deband = core.std.MaskedMerge(extra_deband, deband, extra_mask)
+
+        merge = core.std.MaskedMerge(deband, ref, mask)
+
+        grain = grainer(merge) if grainer is not None \
+            else _noiseFactory(merge, threshold=threshold)
+
+        return depth(grain, clip.format.bits_per_sample)
+
+    def _propFactory(clip: vs.VideoNode,
+                     src_prop: str = "CAMBI",
+                     target_prop: str = None,
+                     ref: None | vs.VideoNode = None):
+        def _prop(n, f, clip):
+            return core.std.SetFrameProp(clip, prop=f'{target_prop}',
+                                         floatval=get_prop(f, src_prop, t=float))
+
+        refClip = clip if ref is None else ref.resize.Point(clip.width, clip.height)
+        setProp = core.std.FrameEval(clip, partial(_prop, clip=refClip), clip)
+        copyProp = core.std.CopyFrameProps(clip, setProp)
+        return copyProp
+
+    def _findNearest(array: list, value: int | float):
+        array = np.asarray(array)
+        return (np.abs(array - value)).argmin()
+
+    def _fun(n, f, clip, debands):
+        val = f.props['CAMBI'] * f3kdb_scale
+        return debands[_findNearest(array=array, value=val)] \
+            if f.props['CAMBI'] > thr[0] else clip
 
     ref = depth(clip, 8, dither_type='ordered') \
         if clip.format.bits_per_sample > 8 else clip
 
     cambi = core.akarin.Cambi(ref, **cambi_dict)
-    # pass props to clip
     props = core.std.CopyFrameProps(clip, prop_src=cambi)
-    process = core.std.FrameEval(clip, partial(_fun, clip=props), props)
+
+    # if we want to use thr as the lower bound maybe something like 
+    # # if {all} in range > thr pass else for any in range < thr = thr
+    array = range(*f3kdb_range, f3kdb_step) 
+    debands = [_debandFactory(clip, x) for x in array]
+    process = core.std.FrameEval(clip, partial(_fun, clip=props, debands=debands), props)
 
     if debug is True:
-        return core.text.FrameProps(process, props=["CAMBI", "f3kdb_thr", "g1str", "g2str"])
+        def _debugProps(n, f, clip):
+            val = f.props['CAMBI'] * f3kdb_scale
+
+            score = np.asarray(array)[_findNearest(array=array, value=val)] \
+                if f.props['CAMBI'] > thr[0] else 0
+
+            props = ["CAMBI", 
+                     "f3kdb_first", 
+                     "f3kdb_second", 
+                     "g1str", 
+                     "g2str"]
+            vals = [f.props['CAMBI'],
+                    score,
+                    score / 1.5 if thr[1] not in (None, 0) else 0,
+                    score / 100 if grainer in (True, None) else 0,
+                    score / 100 if grainer in (True, None) else 0]
+
+            for prop, val in zip(props, vals):
+                clip = core.std.SetFrameProp(clip, prop=prop, floatval=val)
+
+            return clip
+
+        process = core.std.FrameEval(props, partial(_debugProps, clip=process), props)
+         # setting these twice is dumb. fix it.
+         # also add something to drop g1str/g2str from returned props
+         # if a custom noise generator is used
+        return core.text.FrameProps(process,
+                                    props=["CAMBI",
+                                           "f3kdb_first",
+                                           "f3kdb_second",
+                                           "g1str",
+                                           "g2str"])
 
     return process
 
