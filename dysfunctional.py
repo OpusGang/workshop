@@ -288,11 +288,11 @@ def Cambi(clip: vs.VideoNode,
 
 def autoDeband(clip: vs.VideoNode,
                 thr: int | float | tuple | list | None = (10.0, None),
-                f3kdb_range: tuple | list = (12, 48),
-                f3kdb_step: int | float = 6,
-                f3kdb_scale: int | float = 1.2,  # tuple | list for Y'/Cb/Cr?
+                deband_range: tuple | list = (12, 48),
+                deband_step: int | float = 6,
+                deband_scale: int | float = 1.2,
                 grainer: None | bool | vs.VideoNode = None,
-                grainer_args: None | Dict = None,
+                debander: None | vs.VideoNode = None,
                 cambi_args: None | dict = None,
                 debug: bool = False) -> vs.VideoNode:
     """Automated banding detection and filtration via the use of CAMBI
@@ -302,24 +302,27 @@ def autoDeband(clip: vs.VideoNode,
     Requirements:
         Plugins:
             https://github.com/AkarinVS/vapoursynth-plugin
-            https://github.com/HomeOfVapourSynthEvolution/VapourSynth-TCanny
             https://github.com/HomeOfAviSynthPlusEvolution/neo_f3kdb
+            https://github.com/Lypheo/vs-placebo
 
         Modules:
             numpy
-            https://github.com/Irrational-Encoding-Wizardry/vs-debandshit
-            https://github.com/Irrational-Encoding-Wizardry/vsutil
-            https://github.com/Irrational-Encoding-Wizardry/lvsfunc
-            https://github.com/Irrational-Encoding-Wizardry/RgToolsVS
+            https://gitlab.com/Ututu/adptvgrnmod
             https://github.com/HomeOfVapourSynthEvolution/havsfunc
+            https://github.com/Irrational-Encoding-Wizardry/lvsfunc
+            https://github.com/HomeOfVapourSynthEvolution/mvsfunc
+            https://github.com/Irrational-Encoding-Wizardry/vs-debandshit
+            https://github.com/Irrational-Encoding-Wizardry/vsmask
+            https://github.com/Irrational-Encoding-Wizardry/vsutil
+            https://github.com/Irrational-Encoding-Wizardry/RgToolsVS
 
     Args:
         clip (vs.VideoNode): Input clip
         thr (float | tuple): Threshold for detection. Defaults to (10.0, None).
-        f3kdb_range (tuple | list): Lower and upper bound of f3kdb strength.
+        deband_range (tuple | list): Lower and upper bound of deband strength.
             Defaults to (12, 48).
-        f3kdb_step (int | float): Granularity of f3kdb values. Defaults to 6.
-        f3kdb_scale (int | float): Multiplication of CAMBI score.
+        deband_step (int | float): Granularity of deband values. Defaults to 6.
+        deband_scale (int | float): Multiplication of CAMBI score.
             higher values will result in a stronger median f3dkb scrength.
                 Defaults to 1.2.
         grainer (None | bool | vs.VideoNode): Grain application after debanding.
@@ -329,135 +332,136 @@ def autoDeband(clip: vs.VideoNode,
                 Defaults to None.
         debug (bool): Show relevant frame properties. Defaults to False.
 
+
     Returns:
         vs.VideoNode: Fun
     """
-    from debandshit.debanders import f3kpf, dumb3kdb
     from lvsfunc.mask import detail_mask
-    from lvsfunc.util import get_prop
     from rgvs import Blur
     import numpy as np
 
     if not isinstance(thr, tuple | list):
-        thr = (thr, None)
+        thr = (thr, 0)
 
-    #if not isinstance(f3kdb_scale, list):
-    #    f3kdb_scale_list = [f3kdb_scale, f3kdb_scale, f3kdb_scale]
+    if all(thr) is False:
+        thr = [0 if v is None else v for v in thr]
 
-    cambi_dict: Dict[str, Any] = dict(topk=0.001)
+    defaultGrain = True if grainer in (None, True) else False
+    defaultDeband = True if debander is None else False
+
+    cambi_dict: Dict[str, Any] = dict(topk=0.001, tvi_threshold=0.01)
     if cambi_args is not None:
         cambi_dict |= cambi_args
-    # Can I have a tuple of dicts for adptvgrnMod and GrainFactory3?
-    grainer_dict: Dict[str, Any] = dict(lo=18)
-    if grainer_args is not None:
-        grainer_dict |= grainer_args
-    # should graining be its own eval?
-    def _noiseFactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+
+    def _noiseFactory(clip: vs.VideoNode, threshold: float = None) -> vs.VideoNode:
         from havsfunc import GrainFactory3
         from adptvgrnMod import adptvgrnMod
 
-        return adptvgrnMod(clip, **grainer_dict, grainer=lambda g:
-            GrainFactory3(g, g1str=threshold/100, g2str=threshold/125, g3str=0,
+        return adptvgrnMod(clip, lo=18, grainer=lambda g:
+            GrainFactory3(g, g1str=threshold/100, g2str=threshold/125, g3str=threshold/125,
                           temp_avg=66, seed=422)
             )
 
-    # maybe we should also define our own debanding function rather than using debandshit
-    # it would be nice to (optionally) use placebo.Deband.
-    def _debandFactory(clip: vs.VideoNode, threshold: int = None) -> vs.VideoNode:
+    def _debandFactory(clip: vs.VideoNode, threshold: float = None) -> vs.VideoNode:
+
+        def _debandShittier(clip: vs.VideoNode,
+                           threshold: float = None,
+                           limflt_args: None | dict = None) -> vs.VideoNode:
+            from debandshit import dumb3kdb
+            from mvsfunc import LimitFilter
+
+            lf_args: Dict[str, Any] = dict(thr=0.3, elast=2.5, thrc=None)
+            if limflt_args is not None:
+                lf_args |= limflt_args
+
+            blur = core.std.Convolution(clip, [1, 2, 1,
+                                               2, 4, 2,
+                                               1, 2, 1]).std.Convolution([1] * 9, planes=0)
+            diff = core.std.MakeDiff(clip, blur)
+            deband = dumb3kdb(blur, threshold=threshold, use_neo=True, sample_mode=4)
+            deband = LimitFilter(deband, blur, **lf_args)
+
+            if thr[1] not in (None, 0) and thr[1] >= thr[0] and threshold >= thr[0]:
+                diff = dumb3kdb(diff, threshold=int(threshold / 1.33), use_neo=True, sample_mode=4)
+
+            return core.std.MergeDiff(deband, diff)
+
         ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
 
         mask_pre = Blur(get_y(ref))
         mask = detail_mask(mask_pre, sigma=False, rad=5)
-        deband = f3kpf(ref, threshold=threshold,
-                       f3kdb_args=dict(use_neo=True, sample_mode=4))
+        deband = _debandShittier(ref, threshold=threshold) \
+            if defaultDeband is True else debander(ref, threshold)
+
         merge = core.std.MaskedMerge(deband, ref, mask)
 
-        if thr[1] not in (None, 0) and thr[1] >= thr[0]:
-            # using a stronger mask for the second pass
-            extra_mask = detail_mask(mask_pre, sigma=False, rad=5)
-            extra_deband = dumb3kdb(merge, threshold=threshold,
-                                    use_neo=True, sample_mode=4)
-            merge = core.std.MaskedMerge(extra_deband, merge, extra_mask)
-
+        # this is pretty gross
         if grainer is False:
             pass
         elif grainer in (True, None):
             merge = _noiseFactory(merge, threshold=threshold)
+            merge = core.std.SetFrameProp(merge, prop="test", floatval=threshold)
         else:
-            merge = grainer(merge)
+            merge = grainer(merge, threshold)
 
         return depth(merge, clip.format.bits_per_sample)
 
-    def _propFactory(clip: vs.VideoNode,
-                     src_prop: str = "CAMBI",
-                     target_prop: str = None,
-                     ref: None | vs.VideoNode = None) -> vs.VideoNode:
-        def _prop(n, f, clip) -> None:
-            return core.std.SetFrameProp(clip, prop=f'{target_prop}',
-                                         floatval=get_prop(f, src_prop, t=float))
-
-        refClip = clip if ref is None else ref.resize.Point(clip.width, clip.height, clip.format.id)
-        setProp = core.std.FrameEval(clip, partial(_prop, clip=refClip), clip)
-        copyProp = core.std.CopyFrameProps(clip, setProp)
-        return copyProp
-
-    def _findNearest(array: list, value: int | float) -> int | float:
+    def _findNearest(array: tuple | list, value: int | float) -> int | float:
         array = np.asarray(array)
         return (np.abs(array - value)).argmin()
 
-    # is there any way here to intelligently scale chroma without spawning
-    # more f3kdb values?
-    # [val.append(_findNearest(array=array, value=f.props['CAMBI'] * x)) for x in list]
     def _fun(n, f, clip, debands) -> None:
-        val = f.props['CAMBI'] * f3kdb_scale
+        val = f.props['CAMBI'] * deband_scale
         return debands[_findNearest(array=array, value=val)] \
-            if f.props['CAMBI'] > thr[0] else clip
+            if f.props['CAMBI'] >= thr[0] else clip
 
-    ref = depth(clip, 8, dither_type='ordered') \
-        if clip.format.bits_per_sample > 8 else clip
+    ref = get_y(clip).std.Limiter(16 << (clip.format.bits_per_sample - 8),
+                                         235 << (clip.format.bits_per_sample - 8))
+    ref = depth(ref, 8, dither_type='ordered') \
+        if clip.format.bits_per_sample > 8 else get_y(clip)
 
     cambi = core.akarin.Cambi(ref, **cambi_dict)
     props = core.std.CopyFrameProps(clip, prop_src=cambi)
 
-    # if we want to use thr as the lower bound maybe something like
-    # # if {all} in range > thr pass else for any in range < thr = thr
-    array = range(*f3kdb_range, f3kdb_step)
+    array = range(*deband_range, deband_step)
     debands = [_debandFactory(clip, x) for x in array]
     process = core.std.FrameEval(clip, partial(_fun, clip=props, debands=debands), props)
 
+    # debug section is an absolute travesty
     if debug is True:
+        chooseProps = ["CAMBI", "deband"]
+
+        if defaultDeband is True:
+            chooseProps.append("deband_second")
+
+        if defaultGrain is True:
+            grainProps = ["g1str", "g2str", "g3str"]
+            [chooseProps.append(p) for p in grainProps]
+
         def _debugProps(n, f, clip) -> None:
-            val = f.props['CAMBI'] * f3kdb_scale
+            val = f.props['CAMBI'] * deband_scale
 
             score = np.asarray(array)[_findNearest(array=array, value=val)] \
-                if f.props['CAMBI'] > thr[0] else 0
+                if f.props['CAMBI'] >= thr[0] else 0, \
+                np.asarray(array)[_findNearest(array=array, value=val)] \
+                    if f.props['CAMBI'] >= thr[1] not in (None, 0) and thr[1] >= thr[0] else 0
 
-            props = ["CAMBI",
-                     "f3kdb_first",
-                     "f3kdb_second",
-                     "g1str",
-                     "g2str"]
-            vals = [f.props['CAMBI'],
-                    score,
-                    score if thr[1] not in (None, 0) else 0,
-                    score / 100 if grainer in (True, None) else 0,
-                    score / 125 if grainer in (True, None) else 0]
+            vals = [f.props['CAMBI'], score[0]]
 
-            for prop, val in zip(props, vals):
+            if defaultDeband is True:
+                vals.append(int(score[1] / 1.33))
+
+            if defaultGrain is True:
+                grainVals = [score[0] / 100, score[0] / 125, score[0] / 125]
+                [vals.append(v) for v in grainVals]
+
+            for prop, val in zip(chooseProps, vals):
                 clip = core.std.SetFrameProp(clip, prop=prop, floatval=val)
 
             return clip
 
         process = core.std.FrameEval(props, partial(_debugProps, clip=process), props)
-         # setting these twice is dumb. fix it.
-         # also add something to drop g1str/g2str from returned props
-         # if a custom noise generator is used
-        return core.text.FrameProps(process,
-                                    props=["CAMBI",
-                                           "f3kdb_first",
-                                           "f3kdb_second",
-                                           "g1str",
-                                           "g2str"])
+        return core.text.FrameProps(process, props=chooseProps)
 
     return process
 
