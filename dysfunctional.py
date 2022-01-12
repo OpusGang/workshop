@@ -216,40 +216,44 @@ def unknownDideeDNR1(clip: vs.VideoNode,
     return core.std.MergeDiff(removeNoise2, postExpr)
 
 
-def retinex(clip: vs.VideoNode, mask: Callable[[vs.VideoNode], vs.VideoNode],
-            msrcp_dict: Optional[Dict[str, Any]] = None, tcanny_dict: Optional[Dict[str, Any]] = None) -> vs.VideoNode:
+def retinex(clip: vs.VideoNode,
+            mask: vs.VideoNode,
+            fast: bool = True,
+            msrcp_dict: None | dict = None,
+            tcanny_dict: None | dict = None) -> vs.VideoNode:
 
     msrcp_args: Dict[str, Any] = dict(sigma=[50, 200, 350], upper_thr=0.005, fulls=False)
     if msrcp_dict is not None:
         msrcp_args |= msrcp_dict
 
-    tcanny_args: Dict[str, Any] = dict(sigma=1, mode=1)
+    tcanny_args: Dict[str, Any] = dict(sigma=1, mode=1, op=2)
     if tcanny_dict is not None:
         tcanny_args |= tcanny_dict
 
     if clip.format.num_planes > 1:
-        clip = get_y(clip)
-        mask = get_y(mask)
+        clip, mask = [get_y(x) for x in (clip, mask)]
 
-    if clip.format.bits_per_sample == 32: 
+    def resample(clip: vs.VideoNode,
+                 function: vs.VideoNode,
+                 dither_type: str = 'none',
+                 input_depth: int = 16) -> vs.VideoNode:
 
-        def resample(clip: vs.VideoNode, function: Callable[[vs.VideoNode], vs.VideoNode],
-                     dither_type: str = 'none') -> vs.VideoNode:
-            # Copy paste stolen code from lvsfunc but forced rounding
+        down = depth(clip, input_depth, dither_type=dither_type)
+        filtered = function(down)
+        return depth(filtered, clip.format.bits_per_sample, dither_type=dither_type)
 
-            down = depth(clip, 16, dither_type=dither_type)
-            filtered = function(down)
-            return depth(filtered, clip.format.bits_per_sample, dither_type=dither_type)
-
-        ret = resample(clip, lambda x: core.retinex.MSRCP(x, **msrcp_args))
-        max_value = 1
-
+    if fast:
+        sqrt = resample(clip, lambda e: core.std.Expr(e, ["x 5 * x * sqrt"]), input_depth=16)
+        ret = core.std.MaskedMerge(clip, sqrt, clip.std.PlaneStats().adg.Mask())
     else:
-        ret = core.retinex.MSRCP(clip, **msrcp_args)
-        max_value = scale_value(1, 32, clip.format.bits_per_sample, scale_offsets=True, range=Range.FULL)
+        ret = core.retinex.MSRCP(clip, **msrcp_args) if clip.format.bits_per_sample <= 16 else \
+            resample(clip, partial(core.retinex.MSRCP, **msrcp_args), dither_type='none')
+
+    max_value = scale_value(1, 32, clip.format.bits_per_sample, scale_offsets=True, range=Range.FULL)
 
     tcanny = core.tcanny.TCanny(ret, **tcanny_args).std.Minimum(coordinates=[1, 0, 1, 0, 0, 1, 0, 1])
-    return depth(core.std.Expr([mask, tcanny], f'x y + {max_value} min'), clip.format.bits_per_sample, dither_type='none')
+    expr = core.std.Expr([mask, tcanny], f'x y + {max_value} min')
+    return depth(expr, clip.format.bits_per_sample, dither_type='none')
 
 
 def Cambi(clip: vs.VideoNode,
@@ -287,7 +291,7 @@ def Cambi(clip: vs.VideoNode,
 
 
 def autoDeband(clip: vs.VideoNode,
-                thr: int | float | tuple | list | None = (10.0, None),
+                thr: int | float = 15.0,
                 deband_range: tuple | list = (12, 48),
                 deband_step: int | float = 6,
                 deband_scale: int | float = 1.2,
@@ -348,8 +352,6 @@ def autoDeband(clip: vs.VideoNode,
     Returns:
         vs.VideoNode: Fun
     """
-    from lvsfunc.mask import detail_mask
-    from rgvs import Blur
     import numpy as np
 
     if not isinstance(thr, tuple | list):
@@ -396,14 +398,13 @@ def autoDeband(clip: vs.VideoNode,
             deband = dumb3kdb(blur, threshold=threshold, **neoDict)
             deband = LimitFilter(deband, blur, **lf_args)
 
-            if thr[1] not in (None, 0) and thr[1] >= thr[0]:
-                diff = dumb3kdb(diff, threshold=int(threshold / 1.33), **neoDict)
-
+            # Should we use another LimitFilter call here?
+            # if thr[1] >= score ... 
+            # diffMask = vsmask.edge.FDOG().get_mask(diff, multi=5)
+            # debandDiff = dumb3kdb(diff, threshold=int(threshold / 1.33), **neoDict)
+            # mergeDiff = core.std.MaskedMerge(debandDiff, diff, diffMask)
             merge = core.std.MergeDiff(deband, diff)
-
-            maskPre = Blur(get_y(merge))
-            maskEdge = detail_mask(maskPre, sigma=False, rad=5)
-            return core.std.MaskedMerge(merge, clip, maskEdge)
+            return merge
 
         ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
 
@@ -430,8 +431,9 @@ def autoDeband(clip: vs.VideoNode,
         # How tf can I return the original score as (approx, score)
         return debands[approx] if f.props['CAMBI'] >= thr[0] else clip
 
-    refYClamp = get_y(clip).std.Limiter(16 << (clip.format.bits_per_sample - 8),
-                                         235 << (clip.format.bits_per_sample - 8))
+    refYClamp = get_y(clip)
+    refYClamp = refYClamp.std.Limiter(min=16 << (clip.format.bits_per_sample - 8),
+                                      max=235 << (clip.format.bits_per_sample - 8))
 
     # If we're really struggling for CPU time we can use a quick lanczos pass
     lanczos = dict(width=clip.width/1.33, height=clip.height/1.33, filter_param_a=0)
@@ -451,12 +453,11 @@ def autoDeband(clip: vs.VideoNode,
     if debug is True:
         chooseProps = [
             "CAMBI",
-            "Fast",
             "deband"
             ]
 
-        if defaultDeband is True:
-            chooseProps.append("deband_second")
+        #if defaultDeband is True:
+        #    chooseProps.append("deband_second")
 
         if defaultGrain is True:
             grainProps = [
@@ -474,13 +475,12 @@ def autoDeband(clip: vs.VideoNode,
 
             vals = [
                 f.props['CAMBI'],
-                1 if fast is True else 0,
                 score
                 ]
 
-            if defaultDeband is True:
-                secondDeband = score if thr[1] not in (None, 0) and thr[1] >= thr[0] else 0
-                vals.append(int(secondDeband / 1.33))
+            #if defaultDeband is True:
+            #    secondDeband = score if thr[1] not in (None, 0) and thr[1] >= thr[0] else 0
+            #    vals.append(int(secondDeband / 1.33))
 
             if defaultGrain is True:
                 grainVals = [
