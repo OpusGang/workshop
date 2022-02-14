@@ -695,6 +695,9 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
     w = round(((clip.width - left - right) * rw) / 2) * 2
     h = round(((clip.height - top - bottom) * rh) / 2) * 2
 
+    if clip.format.subsampling_w != 1 or clip.format.subsampling_h != 1:
+        raise TypeError('the input clip must be 4:2:0')
+
     ind = clip.format.bits_per_sample
 
     clip = depth(clip, 16)
