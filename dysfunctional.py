@@ -692,17 +692,23 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[
         rh = height / clip.height
         rw = width / clip.width
 
-    w = round(((clip.width - left - right) * rw) / 2) * 2
-    h = round(((clip.height - top - bottom) * rh) / 2) * 2
+    orig_w = clip.width
+    orig_h = clip.height
+
+    w = round(((orig_w - left - right) * rw) / 2) * 2
+    h = round(((orig_h - top - bottom) * rh) / 2) * 2
 
     if clip.format.subsampling_w != 1 or clip.format.subsampling_h != 1:
         raise TypeError('the input clip must be 4:2:0')
+    elif orig_w == w and orig_h == h:
+        # noop
+        return clip
 
     ind = clip.format.bits_per_sample
 
     clip = depth(clip, 16)
 
-    shift = .25 - .25 * clip.width / w
+    shift = .25 - .25 * orig_w / w
 
     y, u, v = split(clip)
 
