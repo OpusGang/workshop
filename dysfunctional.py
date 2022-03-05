@@ -291,79 +291,80 @@ def Cambi(clip: vs.VideoNode,
 
 
 def autoDeband(clip: vs.VideoNode,
-                thr: int | float = 15.0,
-                deband_range: tuple | list = (12, 48),
-                deband_step: int | float = 6,
-                deband_scale: int | float = 1.2,
-                grainer: None | bool | vs.VideoNode = None,
-                debander: None | vs.VideoNode = None,
-                cambi_args: None | dict = None,
-                fast: bool = False,
-                debug: bool = False) -> vs.VideoNode:
+               thr: int | float = 12.0,
+               deband_range: tuple | list = (24, 48, 4),
+               deband_scale: int | float = 1.2,
+               grainer: None | bool | vs.VideoNode = None,
+               debander: None | vs.VideoNode = None,
+               cambi_args: None | dict = None,
+               downsample: None | int = None,
+               debug: bool = False) -> vs.VideoNode:
     """
     Automated banding detection and filtration via the use of CAMBI
-    Default values are more or less targeting live action content. For instance,
-    the mask used by the default debanding function may be overzealous for anime.
+    A range of potential debanding functions are spawned, of which
+    an approximated value is chosen based off the score returned by CAMBI.
+    Please see: https://github.com/AkarinVS/vapoursynth-plugin/wiki/CAMBI
 
-    Example range of values can be returned in your terminal:
-        python -c 'print(*range(12, 48, 6))' = 12 18 24 30 36 42
+    For instance, with default values a CAMBI score of 26.5 would
+    return a debanding function with a (strength) value of 24.
+
+    This approach was regretfully necessary due to performance
+    issues with std.FrameEval. Or perhaps my code was just bad.
+
+    Default values are more or less targeting live action content.
+
+    Function is extensible, allowing for custom functions for
+    debanding and grain applied in place of defaults.
+    For anime, consider either disabling the graining function, or
+    or using adptvgrnmod with static=True
 
     Requirements:
         Plugins:
             https://github.com/AkarinVS/vapoursynth-plugin
-            https://github.com/HomeOfAviSynthPlusEvolution/neo_f3kdb
 
         Modules:
             numpy
             https://gitlab.com/Ututu/adptvgrnmod
             https://github.com/HomeOfVapourSynthEvolution/havsfunc
-            https://github.com/HomeOfVapourSynthEvolution/mvsfunc
-            https://github.com/Irrational-Encoding-Wizardry/lvsfunc
             https://github.com/Irrational-Encoding-Wizardry/vs-debandshit
-            https://github.com/Irrational-Encoding-Wizardry/vsmask
-            https://github.com/Irrational-Encoding-Wizardry/vsutil
-            https://github.com/Irrational-Encoding-Wizardry/RgToolsVS
 
-    Args:
-        clip (vs.VideoNode): Input clip
-        thr (float | tuple): Threshold for detection. Defaults to (10.0, None).
-        deband_range (tuple | list): Lower and upper bound of deband strength.
-            Defaults to (12, 48).
-        deband_step (int | float): Granularity of deband values. Defaults to 6.
-        deband_scale (int | float): Multiplication of CAMBI score.
-            higher values will result in a stronger median f3dkb scrength.
-                Defaults to 1.2.
-        debainder (None | vs.VideoNode): Call a custom debanding function.
-            Can be more or less anything you want. Function should take a clip and
-            a threshold. Threshold is dynamically generated as per usual.
-            Use your own mask. debander=partial(customDebandFunc).
-                Defaults to None.
-        grainer (None | bool | vs.VideoNode): Grain application after debanding.
-            Strength is CAMBI * fk3db_scale. Default CAMBI * fk3db_scale / {85/100/115}.
-            Custom grain function should support i16 input.
-                grainer=partial(core.grain.Add)
-            Defaults to None. False to disable.
-        cambi_args (None | dict): Pass arguments to akarin.Cambi
-                Defaults to None.
-        fast (bool): Decrease CAMBI CPU usage by downsampling input.
-                        Results may vary. Defaults to False.
-        debug (bool): Show relevant frame properties. Defaults to False.
-
-    Returns:
-        vs.VideoNode: Fun
+    :param clip:            Clip to be processed.
+    :param thr:             CAMBI threshold for processing.
+                            Defaults to 12.0.
+    :param deband_range:    List or tuple containing precisely 3 integers;
+                            supplied values represent (in order):
+                            Lower and upper filter threshold, number of spawned filters.
+                            Defaults to (24, 48, 4) = [24, 32, 40, 48].
+    :param deband_scale:    Multiplication of CAMBI score passed to function.
+                            Higher values will result in a stronger median strength.
+                            Defaults to 1.2.
+    :param debander:        Call a custom debanding function.
+                            Function should take a clip and a threshold.
+                            Threshold is dynamically generated as per usual
+                            Use your own mask. debander=partial(customDebandFunc)
+                            Defaults to None.
+    :param grainer:         Custom grain function to be applied after debanding.
+                            Value passed is is CAMBI * deband_scale.
+                            Custom grain function should support i16 input.
+                            grainer=partial(core.grain.Add)
+                            False to disable grain. Defaults to None
+    :param cambi_args:      Dictionary of values passed to akarin.Cambi
+                            Defaults to None
+    :param downsample:      Decrease CAMBI CPU usage by downsampling input.
+                            Upscaling is supported but not recommended.
+                            Results may vary. Defaults to None.
+    :param debug:           Show relevant frame properties.
+                            Defaults to False.
     """
     import numpy as np
+    from awsmfunc.base import zr
 
-    if not isinstance(thr, tuple | list):
-        thr = (thr, 0)
-
-    if all(thr) is False:
-        thr = [0 if v is None else v for v in thr]
-
-    defaultGrain = True if grainer in (None, True) else False
+    # this is ugly asf FIXME
+    defaultGrain = [True, 85, 100, 115] \
+        if grainer in (None, True) else False
     defaultDeband = True if debander is None else False
 
-    cambi_dict: Dict[str, Any] = dict(topk=0.001, tvi_threshold=0.01)
+    cambi_dict = dict(topk=0.1, tvi_threshold=0.012)
     if cambi_args is not None:
         cambi_dict |= cambi_args
 
@@ -371,44 +372,22 @@ def autoDeband(clip: vs.VideoNode,
         from havsfunc import GrainFactory3
         from adptvgrnMod import adptvgrnMod
 
-        # Should we even bother with tmp_avg? It adds some overhead for minimal improvement
         return adptvgrnMod(clip, lo=18, grainer=lambda g:
-            GrainFactory3(g, g1str=threshold/85, g2str=threshold/100, g3str=threshold/115,
-                          temp_avg=(int((100 - threshold) / 3)), seed=422)
+            # can I set these with a loop? [n for n in defaultGrain[1:]]
+            GrainFactory3(g,
+                          g1str=threshold/defaultGrain[1],
+                          g2str=threshold/defaultGrain[2],
+                          g3str=threshold/defaultGrain[3],
+                          seed=422)
             )
 
-    def _debandFactory(clip: vs.VideoNode, threshold: float = None) -> vs.VideoNode:
-
-        def _debandShittier(clip: vs.VideoNode,
-                           threshold: float = None,
-                           limflt_args: None | dict = None) -> vs.VideoNode:
-            from debandshit import dumb3kdb
-            from mvsfunc import LimitFilter
-
-            lf_args: Dict[str, Any] = dict(thr=0.3, elast=2.5, thrc=None)
-            if limflt_args is not None:
-                lf_args |= limflt_args
-
-            neoDict = dict(use_neo=True, sample_mode=4)
-
-            blur = core.std.Convolution(clip, [1, 2, 1,
-                                               2, 4, 2,
-                                               1, 2, 1]).std.Convolution([1] * 9, planes=0)
-            diff = core.std.MakeDiff(clip, blur)
-            deband = dumb3kdb(blur, threshold=threshold, **neoDict)
-            deband = LimitFilter(deband, blur, **lf_args)
-
-            # Should we use another LimitFilter call here?
-            # if thr[1] >= score ... 
-            # diffMask = vsmask.edge.FDOG().get_mask(diff, multi=5)
-            # debandDiff = dumb3kdb(diff, threshold=int(threshold / 1.33), **neoDict)
-            # mergeDiff = core.std.MaskedMerge(debandDiff, diff, diffMask)
-            merge = core.std.MergeDiff(deband, diff)
-            return merge
+    def _debandFactory(clip: vs.VideoNode, threshold: float | int = None) -> vs.VideoNode:
+        from debandshit import f3kpf
 
         ref = depth(clip, 16) if clip.format.bits_per_sample != 16 else clip
-
-        deband = _debandShittier(ref, threshold=threshold) \
+        deband = f3kpf(ref, threshold=threshold,
+                       f3kdb_args=dict(use_neo=True, sample_mode=4),
+                       limflt_args=dict(thr=0.3)) \
             if defaultDeband is True else debander(ref, threshold)
 
         # this is pretty gross
@@ -429,15 +408,18 @@ def autoDeband(clip: vs.VideoNode,
         score = f.props['CAMBI'] * deband_scale
         approx = _findNearest(array=array, value=score)
         # How tf can I return the original score as (approx, score)
-        return debands[approx] if f.props['CAMBI'] >= thr[0] else clip
+        return debands[approx] if f.props['CAMBI'] >= thr else clip
 
     refYClamp = get_y(clip)
     refYClamp = refYClamp.std.Limiter(min=16 << (clip.format.bits_per_sample - 8),
                                       max=235 << (clip.format.bits_per_sample - 8))
 
     # If we're really struggling for CPU time we can use a quick lanczos pass
-    lanczos = dict(width=clip.width/1.33, height=clip.height/1.33, filter_param_a=0)
-    ref = core.resize.Lanczos(refYClamp, **lanczos) if fast is True else refYClamp
+    # is lanczos the best filter here? focus: predictability / consistency
+    # if we know how the filter will behave, we can adjust appropriately.
+    lanczos = dict(kernel='lanczos', filter_param_a=0)
+    ref = zr(refYClamp, preset=downsample, **lanczos) \
+        if downsample else refYClamp
 
     ref = depth(ref, 8, dither_type='ordered') \
         if clip.format.bits_per_sample > 8 else get_y(ref)
@@ -445,21 +427,19 @@ def autoDeband(clip: vs.VideoNode,
     cambi = core.akarin.Cambi(ref, **cambi_dict)
     props = core.std.CopyFrameProps(clip, prop_src=cambi)
 
-    array = range(*deband_range, deband_step)
+    array = np.linspace(*deband_range, dtype=int).tolist()
     debands = [_debandFactory(clip, x) for x in array]
-    process = core.std.FrameEval(clip, partial(_fun, clip=props, debands=debands), props)
+    process = clip.std.FrameEval(partial(_fun, clip=props,
+                                         debands=debands), props)
 
-    # this section is an absolute travesty
-    if debug is True:
+    if debug:
         chooseProps = [
             "CAMBI",
-            "deband"
+            "resolution",
+            "deband_str"
             ]
 
-        #if defaultDeband is True:
-        #    chooseProps.append("deband_second")
-
-        if defaultGrain is True:
+        if defaultGrain:
             grainProps = [
                 "g1str",
                 "g2str",
@@ -471,22 +451,19 @@ def autoDeband(clip: vs.VideoNode,
             val = f.props['CAMBI'] * deband_scale
 
             score = np.asarray(array)[_findNearest(array=array, value=val)] \
-                if f.props['CAMBI'] >= thr[0] else 0
+                if f.props['CAMBI'] >= thr else 0
 
             vals = [
                 f.props['CAMBI'],
+                ref.height,
                 score
                 ]
 
-            #if defaultDeband is True:
-            #    secondDeband = score if thr[1] not in (None, 0) and thr[1] >= thr[0] else 0
-            #    vals.append(int(secondDeband / 1.33))
-
-            if defaultGrain is True:
+            if defaultGrain:
                 grainVals = [
-                    score / 85,
-                    score / 100,
-                    score / 115
+                    score / defaultGrain[1],
+                    score / defaultGrain[2],
+                    score / defaultGrain[3]
                     ]
                 [vals.append(v) for v in grainVals]
 
