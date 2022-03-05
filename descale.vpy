@@ -1,12 +1,12 @@
 import vapoursynth as vs
 import vsutil
-import kagefunc 
+import kagefunc
 core = vs.core
 
-src = core.ffms2.Source(r'00000.m2ts')
+src = core.ffms2.Source('0000.m2ts')
 b32 = vsutil.depth(src, 32)
 
-height = 810
+height = 720
 width = vsutil.get_w(height)
 depth = src.format.bits_per_sample
 
@@ -26,12 +26,6 @@ descale_e = core.descale.Debicubic(y, width, height, b=0, c=1/2).resize.Bicubic(
 descale_f = core.descale.Despline36(y, width, height).resize.Spline36(src.width, src.height)
 
 out = [b32, descale_a, descale_b, descale_c, descale_d, descale_e, descale_f]
-out[0], out[1], out[2], out[3], out[4], out[5], out[6] = [core.std.ShufflePlanes([x, b32], [0,1,2], vs.YUV) for x in out[0:]]
 
-out[0].set_output(0)
-out[1].set_output(1)
-out[2].set_output(2)
-out[3].set_output(3)
-out[4].set_output(4)
-out[5].set_output(5)
-out[6].set_output(6)
+for pos, val in enumerate(out):
+    val = core.std.ShufflePlanes([val, b32], [0, 1, 2], vs.YUV).set_output(pos)
