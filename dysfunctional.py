@@ -621,6 +621,27 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
         return c[0]
 
 
+def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
+               width: int = None, height: int = None,
+               ssim_args: Dict[str, Any] = {},
+               prefilter: vs.VideoNode = core.knlm.KNLMeansCL,
+               prefilter_args: Dict[str, Any] = {}) -> vs.VideoNode:
+    from awsmfunc.base import zresize
+    from lvsfunc.scale import ssim_downsample, kernels
+    from vsutil import depth
+
+    noiseDown = zresize(clip, preset=preset, width=width, height=height, kernel='spline36')
+    detailDown = ssim_downsample(clip, width=noiseDown.width, height=noiseDown.height,
+                                 **ssim_args)
+    detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
+
+    postFilter = [prefilter(ref, **prefilter_args)
+                  for ref in (noiseDown, detailDown)]
+
+    storeDiff = core.std.MakeDiff(noiseDown, postFilter[0])
+    return core.std.MergeDiff(storeDiff, postFilter[1])
+
+
 def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[list[float]] = None, width: Optional[int] = None,
              height: Optional[int] = None, left: int = 0, right: int = 0, bottom: int = 0, top: int = 0, ar: str = 16 / 9,
              shader_path: Optional[str] = None, shader_str: Optional[str] = None, repair_fun: Optional[Dict[str, Any]] = None) -> vs.VideoNode:
