@@ -222,7 +222,8 @@ def retinex(clip: vs.VideoNode,
             msrcp_dict: None | dict = None,
             tcanny_dict: None | dict = None) -> vs.VideoNode:
 
-    msrcp_args: Dict[str, Any] = dict(sigma=[50, 200, 350], upper_thr=0.005, fulls=False)
+    msrcp_args: Dict[str, Any] = dict(sigma=[50, 200, 350],
+                                      upper_thr=0.005, fulls=False)
     if msrcp_dict is not None:
         msrcp_args |= msrcp_dict
 
@@ -623,23 +624,45 @@ def bbcf(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=128, blur=999,
 
 def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                width: int = None, height: int = None,
-               ssim_args: Dict[str, Any] = {},
+               smooth: float | vs.VideoNode = 2/3,
+               repair: tuple = (0.5, 0),
                prefilter: vs.VideoNode = core.knlm.KNLMeansCL,
+               ssim_args: Dict[str, Any] = {},
                prefilter_args: Dict[str, Any] = {}) -> vs.VideoNode:
-    from awsmfunc.base import zresize
-    from lvsfunc.scale import ssim_downsample, kernels
-    from vsutil import depth
+    """
+    smooth: detail enhancement
 
-    noiseDown = zresize(clip, preset=preset, width=width, height=height, kernel='spline36')
-    detailDown = ssim_downsample(clip, width=noiseDown.width, height=noiseDown.height,
-                                 **ssim_args)
+    repair: reduce (dark, bright) halos
+    """
+    from awsmfunc.base import zresize
+    from muvsfunc import SSIM_downsample
+    from havsfunc import FineDehalo
+
+    noiseDown = zresize(clip, preset=preset, width=width,
+                        height=height, kernel='spline36')
+
+    luma = [get_y(x) for x in (clip, noiseDown)]
+
+    detailDown = SSIM_downsample(luma[0], w=noiseDown.width,
+                                 h=noiseDown.height,
+                                 smooth=smooth, **ssim_args)
     detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
 
     postFilter = [prefilter(ref, **prefilter_args)
-                  for ref in (noiseDown, detailDown)]
+                  for ref in (luma[1], detailDown)]
 
-    storeDiff = core.std.MakeDiff(noiseDown, postFilter[0])
-    return core.std.MergeDiff(storeDiff, postFilter[1])
+    storeDiff = core.std.MakeDiff(luma[1], postFilter[0])
+    mergeDiff = core.std.MergeDiff(storeDiff, postFilter[1])
+
+    if all(x == 0 for x in repair) is False:
+        clamp = max(min(repair[0], 1.0), 0.0), max(min(repair[1], 1.0), 0.0)
+
+        deHalo = FineDehalo(mergeDiff)
+        mergeDiff = core.std.Expr([mergeDiff, deHalo],
+                                  expr=[f'x y < x x y - {clamp[0]} \
+                                  * - x x y - {clamp[1]} * - ?'])
+
+    return core.std.ShufflePlanes([mergeDiff, noiseDown], [0, 1, 2], vs.YUV)
 
 
 def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None, repair: Optional[list[float]] = None, width: Optional[int] = None,
