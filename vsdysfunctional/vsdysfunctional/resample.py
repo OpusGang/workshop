@@ -1,7 +1,6 @@
 import vapoursynth as vs
-from typing import Callable, Optional, Dict, Any
-from vsutil import get_y, depth, Range, scale_value, split, join
-
+from typing import Optional, Dict, Any
+from vsutil import get_y, depth, split, join
 core = vs.core
 
 
@@ -9,12 +8,11 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                width: int = None, height: int = None,
                smooth: float | vs.VideoNode = 1/3,
                repair: tuple = (0, 0),
-               prefilter: vs.VideoNode = core.knlm.KNLMeansCL,
+               postfilter: vs.VideoNode = core.knlm.KNLMeansCL,
                ssim_args: Dict[str, Any] = {},
                prefilter_args: Dict[str, Any] = {}) -> vs.VideoNode:
     """
     smooth: detail enhancement
-
     repair: reduce (dark, bright) halos. Maybe try (0.5, 0).
     """
     from awsmfunc.base import zresize
@@ -31,7 +29,7 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                                  smooth=smooth, **ssim_args)
     detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
 
-    postFilter = [prefilter(ref, **prefilter_args)
+    postFilter = [postfilter(ref, **prefilter_args)
                   for ref in (luma[1], detailDown)]
 
     storeDiff = core.std.MakeDiff(luma[1], postFilter[0])
@@ -41,6 +39,8 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
         clamp = [max(min(rep, 1.0), 0.0) for rep in repair]
 
         deHalo = FineDehalo(mergeDiff)
+        # MaskedLimitFilter here??
+        # maybe instead of FineDehalo, just use the mask and merge w weights?
         mergeDiff = core.std.Expr([mergeDiff, deHalo],
                                   expr=[f'x y < x x y - {clamp[0]} \
                                   * - x x y - {clamp[1]} * - ?'])

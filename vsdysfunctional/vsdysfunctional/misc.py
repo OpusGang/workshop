@@ -1,81 +1,10 @@
 from functools import partial
 import vapoursynth as vs
+from typing import Optional, Dict, Any, Sequence, Tuple
+from vsutil import disallow_variable_format, disallow_variable_resolution, get_y, depth, scale_value, split, join
+from lvsfunc.util import get_prop
+
 core = vs.core
-
-from typing import Callable, Optional, Dict, Any
-from vsutil import get_y, depth, Range, scale_value, split, join
-
-
-def csharp(flt: vs.VideoNode, src: vs.VideoNode,
-           mode: int = 20) -> vs.VideoNode:
-    """
-    Stolen from Zastin
-    works ok
-    """
-    import rgvs as RGToolsVS
-
-    np = flt.format.num_planes
-    blur = RGToolsVS.RemoveGrain(flt, mode=mode)
-    return core.std.Expr([flt, src, blur],
-                         ['x dup + z - x y min max x y max min', '', ''][:np])
-
-
-def fastFreqMerge(lo: vs.VideoNode, hi: vs.VideoNode,
-                  thresh: int = 12) -> vs.VideoNode:
-
-    def _gauss(clip: vs.VideoNode) -> vs.VideoNode:
-        gauss = core.fmtc.resample(clip, w=clip.width * 2, h=clip.height * 2,
-                                   kernel='gauss', a1=100)
-        return core.fmtc.resample(gauss, w=clip.width, h=clip.height,
-                                  kernel='gauss', a1=thresh)
-
-    hi_freq = core.std.MakeDiff(hi, _gauss(hi))
-    return core.std.MergeDiff(_gauss(lo), hi_freq)
-
-
-def retinex(clip: vs.VideoNode,
-            mask: vs.VideoNode,
-            fast: bool = True,
-            msrcp_dict: None | dict = None,
-            tcanny_dict: None | dict = None) -> vs.VideoNode:
-    """
-    edgeKirsch = retinex(srcPre, vsmask.edge.Kirsch().get_mask(clip),
-                         fast=True, msrcp_dict=dict(op=5))
-    """
-
-    msrcp_args: Dict[str, Any] = dict(sigma=[50, 200, 350],
-                                      upper_thr=0.005, fulls=False)
-    if msrcp_dict is not None:
-        msrcp_args |= msrcp_dict
-
-    tcanny_args: Dict[str, Any] = dict(sigma=1, mode=1, op=2)
-    if tcanny_dict is not None:
-        tcanny_args |= tcanny_dict
-
-    if clip.format.num_planes > 1:
-        clip, mask = [get_y(x) for x in (clip, mask)]
-
-    def resample(clip: vs.VideoNode,
-                 function: vs.VideoNode,
-                 dither_type: str = 'none',
-                 input_depth: int = 16) -> vs.VideoNode:
-
-        down = depth(clip, input_depth, dither_type=dither_type)
-        filtered = function(down)
-        return depth(filtered, clip.format.bits_per_sample, dither_type=dither_type)
-
-    if fast:
-        sqrt = resample(clip, lambda e: core.std.Expr(e, ["x 5 * x * sqrt"]), input_depth=16)
-        ret = core.std.MaskedMerge(clip, sqrt, clip.std.PlaneStats().adg.Mask())
-    else:
-        ret = core.retinex.MSRCP(clip, **msrcp_args) if clip.format.bits_per_sample <= 16 else \
-            resample(clip, partial(core.retinex.MSRCP, **msrcp_args), dither_type='none')
-
-    max_value = scale_value(1, 32, clip.format.bits_per_sample, scale_offsets=True, range=Range.FULL)
-
-    tcanny = core.tcanny.TCanny(ret, **tcanny_args).std.Minimum(coordinates=[1, 0, 1, 0, 0, 1, 0, 1])
-    expr = core.std.Expr([mask, tcanny], f'x y + {max_value} min')
-    return depth(expr, clip.format.bits_per_sample, dither_type='none')
 
 
 def Cambi(clip: vs.VideoNode,
@@ -298,6 +227,99 @@ def autoDeband(clip: vs.VideoNode,
         return core.text.FrameProps(process, props=chooseProps)
 
     return process
+
+
+@disallow_variable_format
+@disallow_variable_resolution
+def autoDeblock(clip: vs.VideoNode, edgevalue: int = 24,
+                function: vs.VideoNode = core.dfttest.dfttest,
+                strs: Sequence[float] = [30, 50, 75],
+                thrs: Sequence[Tuple[float, float, float]] = [(1.5, 2.0, 2.0), (3.0, 4.5, 4.5), (5.5, 7.0, 7.0)],
+                write_props: bool = False,
+                **function_args: Any) -> vs.VideoNode:
+    """
+    A rewrite of fvsfunc.AutoDeblock that uses {anything}.
+    This function checks for differences between a frame and an edgemask with some processing done on it,
+    and for differences between the current frame and the next frame.
+    For frames where both thresholds are exceeded, it will perform deblocking at a specified strength.
+    This will ideally be frames that show big temporal *and* spatial inconsistencies.
+    Thresholds and calculations are added to the frameprops to use as reference when setting the thresholds.
+    Thanks Vardë, louis, setsugen_no_ao!
+    Dependencies:
+    * vs-dpir
+    :param clip:            Input clip
+    :param edgevalue:       Remove edges from the edgemask that exceed this threshold (higher means more edges removed)
+    :param strs:            A list of DPIR strength values (higher means stronger deblocking).
+                            You can pass any arbitrary number of values here.
+                            Sane deblocking strenghts lie between 1–20 for most regular deblocking.
+                            Going higher than 50 is not recommended outside of very extreme cases.
+                            The amount of values in strs and thrs need to be equal.
+    :param thrs:            A list of thresholds, written as [(EdgeValRef, NextFrameDiff, PrevFrameDiff)].
+                            You can pass any arbitrary number of values here.
+                            The amount of values in strs and thrs need to be equal.
+    :param write_props:     Will write verbose props
+    :return:                Deblocked clip
+    """
+    assert clip.format
+
+    def _eval_db(n: int, f: Sequence[vs.VideoFrame],
+                 clip: vs.VideoNode, db_clips: Sequence[vs.VideoNode],
+                 nthrs: Sequence[Tuple[float, float, float]]) -> vs.VideoNode:
+
+        evref_diff, y_next_diff, y_prev_diff = [
+            get_prop(f[i], prop, float)
+            for i, prop in zip(range(3), ['EdgeValRefDiff', 'YNextDiff', 'YPrevDiff'])
+        ]
+        f_type = get_prop(f[0], '_PictType', bytes).decode('utf-8')
+
+        if f_type == 'I':
+            y_next_diff = (y_next_diff + evref_diff) / 2
+
+        out = clip
+        nthr_used = (-1., ) * 3
+        for dblk, nthr in zip(db_clips, nthrs):
+            if all(p > t for p, t in zip([evref_diff, y_next_diff, y_prev_diff], nthr)):
+                out = dblk
+                nthr_used = nthr
+
+        if write_props:
+            for prop_name, prop_val in zip(
+                ['Adb_EdgeValRefDiff', 'Adb_YNextDiff', 'Adb_YPrevDiff',
+                 'Adb_EdgeValRefDiffThreshold', 'Adb_YNextDiffThreshold', 'Adb_YPrevDiffThreshold'],
+                [evref_diff, y_next_diff, y_prev_diff] + list(nthr_used)
+            ):
+                out = out.std.SetFrameProp(prop_name, floatval=max(prop_val * 255, -1))
+
+        return out
+
+    if len(strs) != len(thrs):
+        raise ValueError('autodb_dpir: You must pass an equal amount of values to '
+                         f'strenght {len(strs)} and thrs {len(thrs)}!')
+
+    nthrs = [tuple(x / 255 for x in thr) for thr in thrs]
+
+    rgb = clip
+
+    maxvalue = (1 << rgb.format.bits_per_sample) - 1
+    evref = core.std.Prewitt(rgb)
+    evref = core.std.Expr(evref, f"x {edgevalue} >= {maxvalue} x ?")
+    evref_rm = evref.std.Median().std.Convolution(matrix=[1, 2, 1, 2, 4, 2, 1, 2, 1])
+
+    diffevref = core.std.PlaneStats(evref, evref_rm, prop='EdgeValRef')
+    diffnext = core.std.PlaneStats(rgb, rgb.std.DeleteFrames([0]), prop='YNext')
+    diffprev = core.std.PlaneStats(rgb, rgb[0] + rgb, prop='YPrev')
+
+    db_clips = [
+        function(rgb, **function_args)
+        .std.SetFrameProp('Adb_DeblockStrength', intval=int(st)) for st in strs
+    ]
+
+    debl = core.std.FrameEval(
+        rgb, partial(_eval_db, clip=rgb, db_clips=db_clips, nthrs=nthrs),
+        prop_src=[diffevref, diffnext, diffprev]
+    )
+
+    return debl
 
 
 def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blur=999):

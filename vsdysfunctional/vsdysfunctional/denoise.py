@@ -1,7 +1,6 @@
 import vapoursynth as vs
-from typing import Callable, Optional, Dict, Any
-from vsutil import get_y, depth, Range, scale_value, split, join
-
+from typing import Callable, Optional
+from vsutil import scale_value
 core = vs.core
 
 
