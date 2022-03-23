@@ -232,7 +232,7 @@ def autoDeband(clip: vs.VideoNode,
 @disallow_variable_format
 @disallow_variable_resolution
 def autoDeblock(clip: vs.VideoNode, edgevalue: int = 24,
-                function: vs.VideoNode = core.dfttest.dfttest,
+                function: vs.VideoNode = core.dfttest.DFTTest,
                 strs: Sequence[float] = [30, 50, 75],
                 thrs: Sequence[Tuple[float, float, float]] = [(1.5, 2.0, 2.0), (3.0, 4.5, 4.5), (5.5, 7.0, 7.0)],
                 write_props: bool = False,
@@ -310,8 +310,7 @@ def autoDeblock(clip: vs.VideoNode, edgevalue: int = 24,
     diffprev = core.std.PlaneStats(rgb, rgb[0] + rgb, prop='YPrev')
 
     db_clips = [
-        function(rgb, **function_args)
-        .std.SetFrameProp('Adb_DeblockStrength', intval=int(st)) for st in strs
+        function(rgb, **function_args).std.SetFrameProp('Adb_DeblockStrength', intval=int(st)) for st in strs
     ]
 
     debl = core.std.FrameEval(

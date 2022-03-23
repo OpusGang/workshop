@@ -24,6 +24,26 @@ def __quickResample(clip: vs.VideoNode,
                  dither_type=dither_type)
 
 
+def __pickFn(function: vs.VideoNode, functionAlt: vs.VideoNode, bits: int = 16) -> None:
+    return function if bits < 32 else functionAlt
+
+
+def mvFuncComp(clip: vs.VideoNode, func: vs.VideoNode, **func_args) -> vs.VideoNode:
+    """basic motion compensation via mvtools"""
+    bits = clip.format.bits_per_sample
+
+    mvSuper = __pickFn(core.mv.Super, core.mvsf.Super, bits)(clip)
+
+    vectorBck = __pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=True, delta=1, blksize=8, overlap=4)
+    vectorFwd = __pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=False, delta=1, blksize=8, overlap=4)
+    compBck = __pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorBck)
+    compFwd = __pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorFwd)
+
+    interleave = core.std.Interleave(clips=[compFwd, clip, compBck])
+    process = func(interleave, **func_args)
+    return core.std.SelectEvery(process, cycle=3, offsets=1)
+
+
 def csharp(flt: vs.VideoNode, src: vs.VideoNode,
            mode: int = 20) -> vs.VideoNode:
     """
@@ -67,7 +87,8 @@ def retinex(clip: vs.VideoNode,
         clip, mask = [get_y(x) for x in (clip, mask)]
 
     if fast:
-        sqrt = __quickResample(clip, lambda e: core.std.Expr(e, ["x 5 * x * sqrt"]), input_depth=16)
+        sqrt = __quickResample(clip, lambda e: e.std.Expr(["x 5 * x * sqrt"]),
+                               input_depth=clip.format.bits_per_sample)
         ret = core.std.MaskedMerge(clip, sqrt, clip.std.PlaneStats().adg.Mask())
     else:
         ret = core.retinex.MSRCP(clip, **msrcp_args) if clip.format.bits_per_sample <= 16 else \
