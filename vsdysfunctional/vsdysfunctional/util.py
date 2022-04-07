@@ -24,7 +24,7 @@ def __quickResample(clip: vs.VideoNode,
                  dither_type=dither_type)
 
 
-def __pickFn(function: vs.VideoNode, functionAlt: vs.VideoNode, bits: int = 16) -> None:
+def pickFn(function: vs.VideoNode, functionAlt: vs.VideoNode, bits: int = 16) -> None:
     return function if bits < 32 else functionAlt
 
 
@@ -32,12 +32,12 @@ def mvFuncComp(clip: vs.VideoNode, func: vs.VideoNode, **func_args) -> vs.VideoN
     """basic motion compensation via mvtools"""
     bits = clip.format.bits_per_sample
 
-    mvSuper = __pickFn(core.mv.Super, core.mvsf.Super, bits)(clip)
+    mvSuper = pickFn(core.mv.Super, core.mvsf.Super, bits)(clip)
 
-    vectorBck = __pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=True, delta=1, blksize=8, overlap=4)
-    vectorFwd = __pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=False, delta=1, blksize=8, overlap=4)
-    compBck = __pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorBck)
-    compFwd = __pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorFwd)
+    vectorBck = pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=True, delta=1, blksize=8, overlap=4)
+    vectorFwd = pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=False, delta=1, blksize=8, overlap=4)
+    compBck = pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorBck)
+    compFwd = pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorFwd)
 
     interleave = core.std.Interleave(clips=[compFwd, clip, compBck])
     process = func(interleave, **func_args)
@@ -58,7 +58,8 @@ def csharp(flt: vs.VideoNode, src: vs.VideoNode,
 
 
 def fastFreqMerge(lo: vs.VideoNode, hi: vs.VideoNode,
-                  function: vs.VideoNode = __gauss, **args) -> vs.VideoNode:
+                  function: vs.VideoNode = __gauss,
+                  **args) -> vs.VideoNode:
 
     hi_freq = core.std.MakeDiff(hi, function(hi, **args))
     return core.std.MergeDiff(function(lo, **args), hi_freq)

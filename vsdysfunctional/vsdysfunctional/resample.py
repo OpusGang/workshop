@@ -6,7 +6,8 @@ core = vs.core
 
 def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                width: int = None, height: int = None,
-               smooth: float | vs.VideoNode = 1/3,
+               smooth: float | vs.VideoNode = 2/3,
+               chroma: bool = False,
                repair: tuple = (0, 0),
                postfilter: vs.VideoNode = core.knlm.KNLMeansCL,
                ssim_args: Dict[str, Any] = {},
@@ -17,35 +18,38 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
     """
     from awsmfunc.base import zresize
     from muvsfunc import SSIM_downsample
-    from havsfunc import FineDehalo
 
     noiseDown = zresize(clip, preset=preset, width=width,
                         height=height, kernel='bicubic')
 
-    luma = [get_y(x) for x in (clip, noiseDown)]
+    if chroma:
+        clip = clip, noiseDown
+    else:
+        clip = [get_y(x) for x in (clip, noiseDown)]
 
-    detailDown = SSIM_downsample(luma[0], w=noiseDown.width,
+    detailDown = SSIM_downsample(clip[0], w=noiseDown.width,
                                  h=noiseDown.height,
                                  smooth=smooth, **ssim_args)
     detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
 
     postFilter = [postfilter(ref, **prefilter_args)
-                  for ref in (luma[1], detailDown)]
+                  for ref in (clip[1], detailDown)]
 
-    storeDiff = core.std.MakeDiff(luma[1], postFilter[0])
+    storeDiff = core.std.MakeDiff(clip[1], postFilter[0])
     mergeDiff = core.std.MergeDiff(storeDiff, postFilter[1])
-
-    if all(x == 0 for x in repair) is False:
-        clamp = [max(min(rep, 1.0), 0.0) for rep in repair]
-
-        deHalo = FineDehalo(mergeDiff)
-        # MaskedLimitFilter here??
-        # maybe instead of FineDehalo, just use the mask and merge w weights?
-        mergeDiff = core.std.Expr([mergeDiff, deHalo],
-                                  expr=[f'x y < x x y - {clamp[0]} \
-                                  * - x x y - {clamp[1]} * - ?'])
-
-    return core.std.ShufflePlanes([mergeDiff, noiseDown], [0, 1, 2], vs.YUV)
+    
+    return mergeDiff
+    #if all(x == 0 for x in repair) is False:
+    #    clamp = [max(min(rep, 1.0), 0.0) for rep in repair]
+#
+    #    deHalo = FineDehalo(mergeDiff)
+    #    # MaskedLimitFilter here??
+    #    # maybe instead of FineDehalo, just use the mask and merge w weights?
+    #    mergeDiff = core.std.Expr([mergeDiff, deHalo],
+    #                              expr=[f'x y < x x y - {clamp[0]} \
+    #                              * - x x y - {clamp[1]} * - ?'])
+#
+    #return core.std.ShufflePlanes([mergeDiff, noiseDown], [0, 1, 2], vs.YUV)
 
 
 def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None,

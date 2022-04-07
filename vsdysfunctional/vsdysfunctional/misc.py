@@ -310,7 +310,7 @@ def autoDeblock(clip: vs.VideoNode, edgevalue: int = 24,
     diffprev = core.std.PlaneStats(rgb, rgb[0] + rgb, prop='YPrev')
 
     db_clips = [
-        function(rgb, **function_args).std.SetFrameProp('Adb_DeblockStrength', intval=int(st)) for st in strs
+        function(rgb, st, **function_args).std.SetFrameProp('Adb_DeblockStrength', intval=int(st)) for st in strs
     ]
 
     debl = core.std.FrameEval(

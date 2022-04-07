@@ -15,4 +15,4 @@ def makeline(y, v):
 def makesquare(y):
     return core.std.StackVertical([makeline(y, v) for v in np.arange(0.5,-0.5,-1/10)])
 
-rainbow = makesquare(0.5).resize.Spline36(800,800, format=vs.YUV444P8, dither_type='ordered').set_output()
+rainbow = makesquare(0.5).resize.Spline36(800, 800, format=vs.YUV444PS, dither_type='ordered').set_output()

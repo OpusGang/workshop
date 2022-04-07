@@ -1,5 +1,5 @@
 import vapoursynth as vs
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 from vsutil import scale_value
 core = vs.core
 
@@ -88,7 +88,7 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
             hblksize = blksize // 2
             hthsad = thSAD // 2
 
-            prefilt = rgvs.RemoveGrain(clip, mode=4, planes=plane)
+            prefilt = rgvs.RemoveGrain(clip, mode=4, planes=planes)
             super_r = core.mv.Super(prefilt, pel=pel, sharp=2, rfilter=4)
 
             mvbw1 = core.mv.Recalculate(super_r, mvbw1, overlap=hoverlap, blksize=hblksize, thsad=hthsad)
@@ -111,9 +111,9 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
         return filtered
 
     def _CoolDegrain32(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Optional[int] = None,
-                planes: list[int] = [0, 1, 2], blksize: Optional[int] = None,
-                overlap: Optional[int] = None, pel: Optional[int] = None, recalc: bool = False,
-                pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
+                       planes: list[int] = [0, 1, 2], blksize: Optional[int] = None,
+                       overlap: Optional[int] = None, pel: Optional[int] = None,
+                       recalc: bool = False, pf: Optional[Callable[[vs.VideoNode], vs.VideoNode]] = None) -> vs.VideoNode:
 
         super = core.mvsf.Super(clip, pel=pel, sharp=2, rfilter=4)
         analyse = core.mvsf.Analyze(super, radius=tr, isb=True, overlap=overlap, blksize=blksize)
@@ -124,7 +124,7 @@ def CoolDegrain(clip: vs.VideoNode, tr: int = 2, thSAD: int = 72, thSADC: Option
             blksize = blksize // 2
             thSAD = thSAD // 2
 
-            prefilt = rgvs.removegrain(clip, mode=4, planes=planes)
+            prefilt = rgvs.Blur(clip, radius=2, planes=planes)
             super_r = core.mvsf.Super(prefilt, pel=pel, sharp=2, rfilter=4)
             analyse = core.mvsf.Recalculate(super_r, analyse, overlap=overlap, blksize=blksize)
 
@@ -156,7 +156,6 @@ def unknownDideeDNR1(clip: vs.VideoNode,
         vs.VideoNode: Denoised clip
     """
     import rgvs
-
     neutral = scale_value(128, 8, clip.format.bits_per_sample)
 
     # Here, we simply use FFT3DFilter. There're lots of other possibilities. Basically, you shouldn't use
@@ -201,14 +200,14 @@ def unknownDideeDNR1(clip: vs.VideoNode,
     # (Here: a simple area-based version with relaxed restriction. The full version is more complicated.)
 
     # damp down remaining spots of the denoised clip
-    postBlur = rgvs.minblur(removeNoise2, radius=1, planes=[0,1,2])
+    postBlur = rgvs.minblur(removeNoise2, radius=1)
     # the difference achieved by the denoising
     postDiff = core.std.MakeDiff(clip, removeNoise2)
     # the difference of a simple kernel blur
     postDiff2 = core.std.MakeDiff(postBlur, core.std.Convolution(postBlur,
                                                                  matrix=[1, 2, 1, 2, 4, 2, 1, 2, 1]))
     # limit the difference to the max of what the denoising removed locally.
-    postRepair = rgvs.repair(postDiff2, postDiff, mode=repair, planes=[0,1,2])
+    postRepair = rgvs.repair(postDiff2, postDiff, mode=repair)
     # abs(diff) after limiting may not be bigger than before.
     postExpr = core.std.Expr([postRepair, postDiff2],
                              expr=[f"x {neutral} - abs y {neutral} - abs < x y ?"])
