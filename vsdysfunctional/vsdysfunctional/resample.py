@@ -118,7 +118,7 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None,
         else:
             import urllib.request
 
-            shader = urllib.request.urlopen("https://gist.githubusercontent.com/igv/36508af3ffc84410fe39761d6969be10/raw/ac09db2c0664150863e85d5a4f9f0106b6443a12/SSimDownscaler.glsl")
+            shader = urllib.request.urlopen("https://gist.githubusercontent.com/igv/36508af3ffc84410fe39761d6969be10/raw/6998ff663a135376dbaeb6f038e944d806a9b9d9/SSimDownscaler.glsl")
             shader = shader.read()
     else:
         shader = shader_str
