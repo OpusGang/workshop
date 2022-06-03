@@ -1,6 +1,7 @@
 import vapoursynth as vs
 from typing import Optional, Dict, Any
-from vsutil import get_y, depth, split, join
+from vsutil import get_y, depth, split, join, scale_value
+from rgvs import sbr
 core = vs.core
 
 
@@ -8,14 +9,9 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                width: int = None, height: int = None,
                smooth: float | vs.VideoNode = 2/3,
                chroma: bool = False,
-               repair: tuple = (0, 0),
-               postfilter: vs.VideoNode = core.knlm.KNLMeansCL,
-               ssim_args: Dict[str, Any] = {},
-               prefilter_args: Dict[str, Any] = {}) -> vs.VideoNode:
-    """
-    smooth: detail enhancement
-    repair: reduce (dark, bright) halos. Maybe try (0.5, 0).
-    """
+               postfilter: vs.VideoNode = sbr,
+               ssim_args: Dict[str, Any] = {}) -> vs.VideoNode:
+
     from awsmfunc.base import zresize
     from muvsfunc import SSIM_downsample
 
@@ -32,24 +28,70 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                                  smooth=smooth, **ssim_args)
     detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
 
-    postFilter = [postfilter(ref, **prefilter_args)
+    postFilter = [postfilter(ref)
                   for ref in (clip[1], detailDown)]
 
     storeDiff = core.std.MakeDiff(clip[1], postFilter[0])
     mergeDiff = core.std.MergeDiff(storeDiff, postFilter[1])
     
     return mergeDiff
-    #if all(x == 0 for x in repair) is False:
+    #if all(x > 0 for x in repair):
     #    clamp = [max(min(rep, 1.0), 0.0) for rep in repair]
 #
-    #    deHalo = FineDehalo(mergeDiff)
+    #    deHalo = fine_dehalo(mergeDiff)
+    #    mergeDiff = fine_dehalo.contrasharpening_fine_dehalo(deHalo, mergeDiff)
     #    # MaskedLimitFilter here??
     #    # maybe instead of FineDehalo, just use the mask and merge w weights?
-    #    mergeDiff = core.std.Expr([mergeDiff, deHalo],
-    #                              expr=[f'x y < x x y - {clamp[0]} \
-    #                              * - x x y - {clamp[1]} * - ?'])
+    #    #mergeDiff = core.std.Expr([mergeDiff, deHalo],
+    #    #                          expr=[f'x y < x x y - {clamp[0]} \
+    #    #                          * - x x y - {clamp[1]} * - ?'])
 #
     #return core.std.ShufflePlanes([mergeDiff, noiseDown], [0, 1, 2], vs.YUV)
+    
+
+def ssimBetter2(clip: vs.VideoNode, preset: int = 1080,
+                width: int = None, height: int = None,
+                smooth: float | vs.VideoNode = 2/3,
+                matrix: int = 709,
+                ssim_args: Dict[str, Any] = {}) -> vs.VideoNode:
+
+    from lvsfunc import ssim_downsample, gamma2linear, linear2gamma
+    from awsmfunc.base import zresize
+    import vsmask
+    from rgvs import sbr
+
+    ref = clip
+    if ref.format.color_family != vs.RGB:
+        clip = core.resize.Bicubic(
+            clip, format=vs.RGBS, matrix_in_s=matrix,
+            dither_type='error_diffusion')
+
+    linear = gamma2linear(
+        clip, curve=vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=True
+    )
+
+    noiseDown = zresize(linear, preset=preset, width=width,
+                        height=height, kernel='lanczos', filter_param_a=2)
+
+    detailDown = ssim_downsample(linear, width=noiseDown.width,
+                                 height=noiseDown.height,
+                                 smooth=smooth, **ssim_args)
+    detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
+
+    mask_pre = sbr(detailDown, radius=5)#.std.Convolution(matrix=[1, 2, 1, 2, 4, 2, 1, 2, 1]).std.Convolution(matrix=[1]*9)
+    mask = vsmask.edge.ExKirsch().edgemask(mask_pre, lthr=scale_value(65, 8, 32), hthr=scale_value(80, 8, 32))
+    #mask = vsmask.util.inpand(mask, sw=2, sh=2)
+    #mask = vsmask.util.expand(mask, sw=2, sh=2)
+
+    merge = core.std.MaskedMerge(noiseDown, detailDown, mask)
+    gamma = linear2gamma(
+        merge, curve=vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=True
+    )
+
+    return core.resize.Bicubic(
+        gamma, format=ref.format, matrix_s=matrix,
+        dither_type='error_diffusion'
+        )
 
 
 def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None,
@@ -178,3 +220,25 @@ def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None,
                           src_height=v.height - c[2] - c[3])
 
     return depth(join([y, u, v]), ind) 
+
+
+def linearize(clip: vs.VideoNode, function: vs.VideoNode = None,
+              matrix: int = 709, sigmoid: bool = True,
+              sig_c: float = 5.0, sig_t: float = 0.5):
+    from lvsfunc.scale import gamma2linear, linear2gamma
+
+    ref = clip
+    if ref.format != vs.RGB:
+        clip = core.resize.Bicubic(
+            clip, format=vs.RGBS, matrix_in_s=matrix,
+            dither_type='error_diffusion')
+
+    linear = gamma2linear(
+        clip, vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=sigmoid, cont=sig_c, thr=sig_t
+    )
+
+    resample = function(linear)
+
+    return linear2gamma(
+        resample, vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=sigmoid, cont=sig_c, thr=sig_t
+        )
