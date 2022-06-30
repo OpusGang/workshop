@@ -1,8 +1,8 @@
 from functools import partial
+from typing import Any, Dict, Optional
+
 import vapoursynth as vs
-from typing import Optional, Dict, Any, Sequence, Tuple
-from vsutil import disallow_variable_format, disallow_variable_resolution, get_y, depth, scale_value, split, join
-from lvsfunc.util import get_prop
+from vsutil import depth, get_y, join, scale_value, split
 
 core = vs.core
 
@@ -232,7 +232,8 @@ def autoDeband(clip: vs.VideoNode,
 def output(
         clip: vs.VideoNode | list[vs.VideoNode],
         debug: bool | list | str = False,
-        operation: None | vs.VideoNode = None
+        operation: None | vs.VideoNode = None,
+        start: int = 0,
         ) -> vs.VideoNode:
 
     if isinstance(clip, vs.VideoNode):
@@ -241,14 +242,14 @@ def output(
     for index, node in enumerate(clip):
         if operation:
             node = operation(node)
-
+            
         if debug:
             if isinstance(debug, str | list):
                 node = node.std.PlaneStats().text.FrameProps(props=debug)
             else:
                 node = node.std.PlaneStats().text.FrameProps()
 
-        node.set_output(index)
+        node.set_output(index + start)
 
 
 def bbcfcalc(clip, top=0, bottom=0, left=0, right=0, radius=None, thr=32768, blur=999):
@@ -405,7 +406,7 @@ def f32kdb(clip, range=15, y=32, cb=0, cr=0, sample_mode=4, dither="none"):
     * clips are merged at 32-bit
     * you can also just pass a 32-bit clip (Idc if this is slower or something)
     """
-    from vsutil import depth
+    
     # 16 for sample_mode = 2
     # 32 for rest
     step = 16 if sample_mode == 2 else 32
