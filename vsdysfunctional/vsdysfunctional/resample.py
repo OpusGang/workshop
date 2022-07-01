@@ -11,16 +11,21 @@ core = vs.core
 
 def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                width: int = None, height: int = None,
-               smooth: float | vs.VideoNode = 2/3,
-               chroma: bool = True,
+               smooth: float | vs.VideoNode = 1/3,
+               chroma: bool = False,
                repair: tuple = (0, 0),
                postfilter: Callable[[vs.VideoNode], vs.VideoNode] = None,
                ssim_args: Dict[str, Any] = {},
                ) -> vs.VideoNode:
 
+    bits = clip.format.bits_per_sample
+    
+    if bits < 16:
+        clip = depth(clip, 16)
+    
     if postfilter is None:
         postfilter = partial(core.dfttest.DFTTest, tbsize=1, sigma=20)
-
+    
     noiseDown = zresize(clip, preset=preset, width=width, height=height,
                         kernel='lanczos', filter_param_b=2)
 
@@ -29,8 +34,8 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
     else:
         clip = [get_y(x) for x in (clip, noiseDown)]
 
-    detailDown = SSIM_downsample(clip[0], w=noiseDown.width,
-                                 h=noiseDown.height,
+    detailDown = ssim_downsample(clip[0], width=noiseDown.width,
+                                 height=noiseDown.height,
                                  smooth=smooth, **ssim_args)
     detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
 
@@ -47,7 +52,14 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                                   expr=[f'x y < x x y - {clamp[0]} \
                                   * - x x y - {clamp[1]} * - ?'])
 
-    return core.std.ShufflePlanes([mergeDiff, noiseDown], [0, 1, 2], vs.YUV)
+    if chroma:
+        return depth(mergeDiff, bits)
+    
+    shuffle = core.std.ShufflePlanes(
+        [mergeDiff, noiseDown], [0, 1, 2], vs.YUV
+        )
+    
+    return depth(shuffle, bits)
 
 
 def ssimdown(clip: vs.VideoNode, preset: Optional[int] = None,
@@ -200,13 +212,7 @@ def zfun(clip: vs.VideoNode,
 
     if preset:
         if orig_cropped_w / orig_cropped_h > ar:
-            return zresize(clip,
-                           width=int(ar * preset),
-                           left=left,
-                           right=right,
-                           top=top,
-                           bottom=bottom,
-                           **kwargs)
+            print(int(ar * preset))
         else:
             return zresize(clip, height=preset, left=left, right=right, top=top, bottom=bottom, **kwargs)
 
@@ -227,24 +233,3 @@ def zfun(clip: vs.VideoNode,
 
     return dict(width=w, height=h, src_left=left, src_top=top, src_width=orig_cropped_w, src_height=orig_cropped_h)
 
-
-def linearize(clip: vs.VideoNode, function: vs.VideoNode = None,
-              matrix: int = 709, sigmoid: bool = True,
-              sig_c: float = 5.0, sig_t: float = 0.5):
-    from lvsfunc.scale import gamma2linear, linear2gamma
-
-    ref = clip
-    if ref.format != vs.RGB:
-        clip = core.resize.Bicubic(
-            clip, format=vs.RGBS, matrix_in_s=matrix,
-            dither_type='error_diffusion')
-    # technically this should be 1886 instead of 709
-    linear = gamma2linear(
-        clip, vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=sigmoid, cont=sig_c, thr=sig_t
-    )
-
-    resample = function(linear)
-
-    return linear2gamma(
-        resample, vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=sigmoid, cont=sig_c, thr=sig_t
-        )
