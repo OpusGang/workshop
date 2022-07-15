@@ -3,13 +3,13 @@ from typing import Any, Callable, Dict, Optional
 
 import vapoursynth as vs
 from awsmfunc.base import zresize
-from muvsfunc import SSIM_downsample
+from lvsfunc import ssim_downsample
 from vsutil import depth, get_y, join, split
 
 core = vs.core
 
 
-def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
+def ssimBetter(clip: vs.VideoNode, preset: int = None,
                width: int = None, height: int = None,
                smooth: float | vs.VideoNode = 1/3,
                chroma: bool = False,
@@ -19,13 +19,13 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
                ) -> vs.VideoNode:
 
     bits = clip.format.bits_per_sample
-    
+
     if bits < 16:
         clip = depth(clip, 16)
-    
+
     if postfilter is None:
         postfilter = partial(core.dfttest.DFTTest, tbsize=1, sigma=20)
-    
+
     noiseDown = zresize(clip, preset=preset, width=width, height=height,
                         kernel='lanczos', filter_param_b=2)
 
@@ -54,11 +54,11 @@ def ssimBetter(clip: vs.VideoNode, preset: int = 1080,
 
     if chroma:
         return depth(mergeDiff, bits)
-    
+
     shuffle = core.std.ShufflePlanes(
         [mergeDiff, noiseDown], [0, 1, 2], vs.YUV
         )
-    
+
     return depth(shuffle, bits)
 
 

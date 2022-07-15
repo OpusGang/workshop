@@ -2,9 +2,15 @@ from functools import partial
 from typing import Any, Dict, Optional
 
 import vapoursynth as vs
-from vsutil import depth, get_y, join, scale_value, split
+from vsutil import depth, get_y, join, scale_value, split, iterate
+from vsrgtools import repair
 
 core = vs.core
+
+
+def art(clip: vs.VideoNode) -> vs.VideoNode:
+    blur = core.ctmf.CTMF(clip, radius=12)
+    return iterate(blur, partial(repair, clip, mode=11), 8)
 
 
 def Cambi(clip: vs.VideoNode,
