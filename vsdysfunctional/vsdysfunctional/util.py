@@ -1,14 +1,11 @@
 from functools import partial
-from typing import Any, Dict
+from typing import Any, Dict, Callable, List
 
-import rgvs as RGToolsVS
-import vapoursynth as vs
+import vsrgtools
 from jvsfunc.misc import retinex as jretinex
-from lvsfunc.scale import gamma2linear, linear2gamma
-from vsutil import Range, depth, get_y, scale_value
-
-core = vs.core
-
+#from vsscale import gamma2linear, linear2gamma
+from vstools import split, vs, core, depth, get_y, scale_value, VSFunction
+from vsrgtools import gauss_blur
 
 class LambdaFN():
     def __call__(
@@ -122,41 +119,26 @@ class Map:
 
 
 def gauss(clip: vs.VideoNode, thresh: int = None) -> vs.VideoNode:
-    gauss = core.fmtc.resample(clip, w=clip.width * 2, h=clip.height * 2,
-                               kernel='gauss', a1=100)
-    return core.fmtc.resample(gauss, w=clip.width, h=clip.height,
-                              kernel='gauss', a1=thresh)
+    gauss = clip.fmtc.resample(w=clip.width * 2, h=clip.height * 2, kernel='gauss', a1=100)
+    return gauss.fmtc.resample(w=clip.width, h=clip.height, kernel='gauss', a1=thresh)
 
 
-def __quickResample(clip: vs.VideoNode,
-                    function: LambdaFN,
-                    dither_type: str = 'none',
-                    input_depth: int = 16) -> vs.VideoNode:
+def __quickResample(
+    clip: vs.VideoNode,
+    function: LambdaFN,
+    dither_type: str = 'none',
+    input_depth: int = 16
+) -> vs.VideoNode:
 
     down = depth(clip, input_depth, dither_type=dither_type)
+    
     filtered = function(down)
-    return depth(filtered, clip.format.bits_per_sample,
-                 dither_type=dither_type)
-
-
-def pickFn(function: LambdaFN, functionAlt: LambdaFN, bits: int = 16) -> None:
-    return function if bits < 32 else functionAlt
-
-
-def mvFuncComp(clip: LambdaFN, func: LambdaFN, **func_args) -> vs.VideoNode:
-    """basic motion compensation via mvtools"""
-    bits = clip.format.bits_per_sample
-
-    mvSuper = pickFn(core.mv.Super, core.mvsf.Super, bits)(clip)
-
-    vectorBck = pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=True, delta=1, blksize=16, overlap=8)
-    vectorFwd = pickFn(core.mv.Analyse, core.mvsf.Analyze, bits)(mvSuper, isb=False, delta=1, blksize=16, overlap=8)
-    compBck = pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorBck)
-    compFwd = pickFn(core.mv.Compensate, core.mvsf.Compensate, bits)(clip, super=mvSuper, vectors=vectorFwd)
-
-    interleave = core.std.Interleave(clips=[compFwd, clip, compBck])
-    process = func(interleave, **func_args)
-    return core.std.SelectEvery(process, cycle=3, offsets=1)
+    
+    return depth(
+        filtered,
+        clip.format.bits_per_sample,
+        dither_type=dither_type
+        )
 
 
 def csharp(flt: vs.VideoNode, src: vs.VideoNode,
@@ -166,21 +148,77 @@ def csharp(flt: vs.VideoNode, src: vs.VideoNode,
     works ok
     """
     np = flt.format.num_planes
-    blur = RGToolsVS.RemoveGrain(flt, mode=mode)
-    return core.std.Expr(
-        [flt, src, blur],
-        ['x dup + z - x y min max x y max min', '', ''][:np]
-        )
+    expr = 'x dup + z - x y min max x y max min'
+
+    blur = vsrgtools.removegrain(flt, mode=mode)
+
+    return core.std.Expr([flt, src, blur], [expr, '', ''][:np])
 
 
-def fastFreqMerge(lo: vs.VideoNode, hi: vs.VideoNode,
-                  function: vs.VideoNode = None,
-                  **args) -> vs.VideoNode:
-    if function is None:
-        function = partial(gauss, thresh=6)
+def fast_frequency_merge(
+    lo_clip: vs.VideoNode,
+    hi_clip: vs.VideoNode,
+    function: partial(gauss, sigma=1.5)
+) -> vs.VideoNode:
+    """
+    Simple frequency splitter. high and low are seperated by
+    whatever function you want.
+    
+    Example usage may be to limit some kind of aggressive smoothing filter
+    to high frequencies to fix blocking artifacts.
+    """
+    hi_blur = function(hi_clip)
+    lo_blur = function(lo_clip)
+    
+    hi_freq = core.std.MakeDiff(hi_clip, hi_blur)
+    lo_freq = core.std.MergeDiff(lo_blur, hi_freq)
+    
+    return lo_freq
 
-    hi_freq = core.std.MakeDiff(hi, function(hi, **args))
-    return core.std.MergeDiff(function(lo, **args), hi_freq)
+
+def n_frequency_split(
+    clip: vs.VideoNode,
+    sigmas: list[float] = [1, 3],
+    function: VSFunction = partial(gauss_blur),
+    filters: list[VSFunction] = None
+) -> vs.VideoNode:
+    """
+    n-frequency splitter. Frequencies are separated by the given function.
+    order is high -> low
+
+    filter high-freq, low-freq, ignore mid-freq:
+
+    sigmas=[1, 2],
+    function=partial(gauss_blur),
+    filters=[lambda x: x.std.BoxBlur(), lambda x: x, lambda x: SMDegrain(x)]
+    """
+    if not isinstance(sigmas, list):
+        sigmas = list(sigmas)
+
+    assert len(sigmas) + 1 == len(filters), \
+        "Number of filters should be one more than the number of sigmas"
+
+    def get_diffs(
+        clip: vs.VideoNode,
+        sigmas: List[float]
+    ) -> List[vs.VideoNode]:
+
+        blur_clips = [function(clip, sigma) for sigma in sigmas]
+        diffs = [core.std.MakeDiff(clip, blur_clips[0])]
+        for i in range(len(blur_clips) - 1):
+            diffs.append(core.std.MakeDiff(blur_clips[i], blur_clips[i + 1]))
+        return diffs
+
+    diffs = get_diffs(clip, sigmas)
+
+    filtered_diffs = [filters[i](diffs[i]) for i in range(len(filters) - 1)]
+    filtered_blur = filters[-1](function(clip, sigmas[-1]))
+
+    result = filtered_blur
+    for filtered_diff in reversed(filtered_diffs):
+        result = core.std.MergeDiff(result, filtered_diff)
+
+    return result
 
 
 def retinex(clip: vs.VideoNode,
@@ -207,73 +245,120 @@ def retinex(clip: vs.VideoNode,
     else:
         ret = jretinex(clip, sigmas=[50, 200, 350], fast=True)
 
-    max_value = scale_value(1, 32, clip.format.bits_per_sample, scale_offsets=True, range=Range.FULL)
+    max_value = scale_value(1, 32, clip.format.bits_per_sample, scale_offsets=True, range=vs.RANGE_FULL)
 
     tcanny = core.tcanny.TCanny(ret, **tcanny_args).std.Minimum(coordinates=[1, 0, 1, 0, 0, 1, 0, 1])
     expr = core.std.Expr([mask, tcanny], f'x y + {max_value} min')
     return depth(expr, clip.format.bits_per_sample, dither_type='none')
 
 
-class toLinear:
-    def expr(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return gamma2linear(
-            clip, curve=vs.TransferCharacteristics.TRANSFER_BT709
+def filter_grey(clip: vs.VideoNode,
+                filter: vs.VideoNode,
+                threshold: float = 0.003
+                ) -> vs.VideoNode:
+    """
+    thing
+
+    Args:
+        clip (vs.VideoNode): input clip
+        filter (vs.VideoNode): filter to apply on grey
+        threshold (float): return clip if diff > threshold
+    Returns:
+        vs.VideoNode: the thing
+    """
+
+    def _fun(
+        n, f, clip: vs.VideoNode, flt: vs.VideoNode,
+        threshold: float = threshold
+        ):
+        
+        get_props = [i.props['PlaneStatsAverage'] for i in f]
+
+        score_props = abs(max(get_props) - min(get_props))
+
+        check = score_props < threshold
+        
+        props = dict(
+            R=get_props[0], G=get_props[1], B=get_props[2],
+            rgb_max_diff=score_props, is_grey=check
+            )
+
+        clip, flt = [core.std.SetFrameProps(i, **props) \
+            for i in (clip, flt)]
+
+        return flt if check else clip
+
+    temp_clip = core.resize.Point(
+            clip, format=vs.RGBS, matrix_in_s='709',
+        ) if clip.format.color_family != vs.RGB else clip
+    
+    rgb = split(temp_clip)
+    rgb = [core.std.PlaneStats(i) for i in rgb]
+        
+    return core.std.FrameEval(
+        clip, partial(_fun, clip=clip, flt=filter), prop_src=[*rgb]
         )
 
-    def fmtc(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return core.fmtc.transfer(
-            clip, transs='1886', transd='linear', bits=32
-        )
-
-    def zimg(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return core.resize.Bicubic(
-            clip, matrix_in_s='709', transfer_in_s='709', transfer_s='linear'
-        )
-
-    def sigmoid(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return core.fmtc.transfer(
-            clip, transs='linear', transd='sigmoid'
-        )
-
-
-class fromLinear:
-    def expr(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return linear2gamma(
-            clip, curve=vs.TransferCharacteristics.TRANSFER_BT709
-        )
-
-    def fmtc(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return core.fmtc.transfer(
-            clip, transs='linear', transd='1886'
-        )
-
-    def zimg(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return core.resize.Bicubic(
-            clip, transfer_in_s='linear', transfer_s='709'
-        )
-
-    def sigmoid(self, clip: vs.VideoNode) -> vs.VideoNode:
-        return core.fmtc.transfer(
-            clip, transs='sigmoid', transd='linear'
-        )
-
-
-def linearize(clip: vs.VideoNode, function: vs.VideoNode = None,
-              matrix: int = 709, sigmoid: bool = True,
-              sig_c: float = 5.0, sig_t: float = 0.5):
-
-    ref = clip
-    if ref.format != vs.RGB:
-        clip = core.resize.Bicubic(
-            clip, format=vs.RGBS, matrix_in_s=matrix,
-            dither_type='error_diffusion')
-    # technically this should be 1886 instead of 709
-    linear = gamma2linear(
-        clip, vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=sigmoid, cont=sig_c, thr=sig_t
-    )
-
-    resample = function(linear)
-
-    return linear2gamma(
-        resample, vs.TransferCharacteristics.TRANSFER_BT709, sigmoid=sigmoid, cont=sig_c, thr=sig_t
-        )
+#class toLinear:
+#    def expr(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return gamma2linear(
+#            clip, curve=vs.TransferCharacteristics.TRANSFER_BT709
+#        )
+#
+#    def fmtc(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return core.fmtc.transfer(
+#            clip, transs='1886', transd='linear', bits=32
+#        )
+#
+#    def zimg(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return core.resize.Bicubic(
+#            clip, matrix_in_s='709', transfer_in_s='709', transfer_s='linear'
+#        )
+#
+#    def sigmoid(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return core.fmtc.transfer(
+#            clip, transs='linear', transd='sigmoid'
+#        )
+#
+#
+#class fromLinear:
+#    def expr(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return linear2gamma(
+#            clip, curve=vs.TransferCharacteristics.TRANSFER_BT709
+#        )
+#
+#    def fmtc(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return core.fmtc.transfer(
+#            clip, transs='linear', transd='1886'
+#        )
+#
+#    def zimg(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return core.resize.Bicubic(
+#            clip, transfer_in_s='linear', transfer_s='709'
+#        )
+#
+#    def sigmoid(self, clip: vs.VideoNode) -> vs.VideoNode:
+#        return core.fmtc.transfer(
+#            clip, transs='sigmoid', transd='linear'
+#        )
+#
+#
+#def linearize(clip: vs.VideoNode, function: vs.VideoNode = None,
+#              matrix: int = 709, sigmoid: bool = True,
+#              sig_c: float = 5.0, sig_t: float = 0.5):
+#
+#    linear = gamma2linear(
+#        clip,
+#        vs.TransferCharacteristics.TRANSFER_BT709,
+#        sigmoid=sigmoid, cont=sig_c, thr=sig_t
+#    )
+#
+#    resample = function(linear)
+#
+#    gamma = linear2gamma(
+#        resample,
+#        vs.TransferCharacteristics.TRANSFER_BT709,
+#        sigmoid=sigmoid, cont=sig_c, thr=sig_t
+#        )
+#
+#    return gamma

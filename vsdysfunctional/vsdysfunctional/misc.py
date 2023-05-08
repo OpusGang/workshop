@@ -1,11 +1,14 @@
 from functools import partial
 from typing import Any, Dict, Optional
+from enum import Enum
 
-import vapoursynth as vs
-from vsutil import depth, get_y, join, scale_value, split, iterate
+from vstools import vs, core, depth, get_y, join, scale_value, split, iterate
 from vsrgtools import repair
+from .metrics import Metric
 
-core = vs.core
+import os
+from urllib.request import Request, urlopen, urlretrieve
+from urllib.parse import urlparse
 
 
 def art(clip: vs.VideoNode) -> vs.VideoNode:
@@ -236,24 +239,52 @@ def autoDeband(clip: vs.VideoNode,
 
 
 def output(
-        clip: vs.VideoNode | list[vs.VideoNode],
-        debug: bool | list | str = False,
-        operation: None | vs.VideoNode = None,
-        start: int = 0,
-        ) -> vs.VideoNode:
+    source: vs.VideoNode = None,
+    clips: vs.VideoNode | list[vs.VideoNode] = None,
+    debug: bool | list | str = False,
+    operation: None | vs.VideoNode = None,
+    start: int = 0,
+) -> vs.VideoNode:
 
-    if isinstance(clip, vs.VideoNode):
-        clip = [clip]
+    if isinstance(source, vs.VideoNode):
+        source = [source]
 
-    for index, node in enumerate(clip):
+    if isinstance(clips, vs.VideoNode):
+        clips = [clips]
+
+    if source:
+        for i in source:
+            i.set_output(start)
+            start += 1
+
+    for index, node in enumerate(clips):
         if operation:
-            node = operation(node)
-            
-        if debug:
-            if isinstance(debug, str | list):
-                node = node.std.PlaneStats().text.FrameProps(props=debug)
+            if isinstance(operation, Metric):
+                node = metrics(reference=source[0], distorted=node, metric=operation) # noqa
             else:
-                node = node.std.PlaneStats().text.FrameProps()
+                node = operation(node)
+
+        if debug:
+            node = node.std.PlaneStats()
+            _prop = []
+
+            if isinstance(debug, Metric):
+                _prop = list(debug)
+
+            if isinstance(debug, list):
+                for i in debug:
+                    if isinstance(i, Metric):
+                        _prop.extend(list(i))
+                    else:
+                        _prop.append(i)
+
+            if isinstance(debug, str):
+                _prop = debug
+
+            if isinstance(debug, bool):
+                node = node.text.FrameProps()
+            else:
+                node = node.text.FrameProps(_prop)
 
         node.set_output(index + start)
 

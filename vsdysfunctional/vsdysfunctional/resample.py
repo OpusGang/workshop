@@ -3,8 +3,9 @@ from typing import Any, Callable, Dict, Optional
 
 import vapoursynth as vs
 from awsmfunc.base import zresize
-from lvsfunc import ssim_downsample
+from vsscale import SSIM
 from vsutil import depth, get_y, join, split
+from dfttest2 import DFTTest, Backend
 
 core = vs.core
 
@@ -24,7 +25,7 @@ def ssimBetter(clip: vs.VideoNode, preset: int = None,
         clip = depth(clip, 16)
 
     if postfilter is None:
-        postfilter = partial(core.dfttest.DFTTest, tbsize=1, sigma=20)
+        postfilter = partial(DFTTest, tbsize=3, sigma=12)
 
     noiseDown = zresize(clip, preset=preset, width=width, height=height,
                         kernel='lanczos', filter_param_b=2)
@@ -34,9 +35,8 @@ def ssimBetter(clip: vs.VideoNode, preset: int = None,
     else:
         clip = [get_y(x) for x in (clip, noiseDown)]
 
-    detailDown = ssim_downsample(clip[0], width=noiseDown.width,
-                                 height=noiseDown.height,
-                                 smooth=smooth, **ssim_args)
+    detailDown = SSIM().scale(
+        clip[0], width=noiseDown.width, height=noiseDown.height, smooth=smooth, **ssim_args)
     detailDown = depth(detailDown, noiseDown.format.bits_per_sample)
 
     postFilter = [postfilter(ref)
@@ -48,9 +48,10 @@ def ssimBetter(clip: vs.VideoNode, preset: int = None,
     if all(x == 0 for x in repair) is False:
         clamp = [max(min(rep, 1.0), 0.0) for rep in repair]
         # basic limiter taken from dehalo_alpha
-        mergeDiff = core.std.Expr([mergeDiff, noiseDown],
-                                  expr=[f'x y < x x y - {clamp[0]} \
-                                  * - x x y - {clamp[1]} * - ?'])
+        mergeDiff = core.std.Expr(
+            [mergeDiff, noiseDown],
+            expr=[f'x y < x x y - {clamp[0]} * - x x y - {clamp[1]} * - ?']
+            )
 
     if chroma:
         return depth(mergeDiff, bits)

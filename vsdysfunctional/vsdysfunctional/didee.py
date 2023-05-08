@@ -3,7 +3,7 @@ from functools import partial
 import vapoursynth as vs
 from vardefunc import RGBPlanes
 from vsrgtools import repair
-from vsrgtools.util import normalise_planes
+from vstools import normalize_planes
 from vsutil import iterate, scale_value
 
 core = vs.core
@@ -41,7 +41,7 @@ def sharp(clip: vs.VideoNode, radius: int = 12, planes: list | int = [0, 1, 2]) 
 
     expr_string = f"x x y - abs {val1} 2 pow / 1 {val1} / pow {val1} 3 pow * x y - x y - abs {val1} + / * +"
     return core.akarin.Expr([clip, rep], [
-        expr_string if i in normalise_planes(clip, planes) else ''
+        expr_string if i in normalize_planes(clip, planes) else ''
         for i in range(clip.format.num_planes)
     ], opt=True)
 
