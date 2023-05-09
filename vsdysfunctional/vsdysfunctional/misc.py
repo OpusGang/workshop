@@ -4,7 +4,7 @@ from enum import Enum
 
 from vstools import vs, core, depth, get_y, join, scale_value, split, iterate
 from vsrgtools import repair
-from .metrics import Metric
+from .metrics import Metric, metrics
 
 import os
 from urllib.request import Request, urlopen, urlretrieve
@@ -237,6 +237,11 @@ def autoDeband(clip: vs.VideoNode,
 
     return process
 
+def is_list(lst):
+    if isinstance(lst, list):
+        return all(isinstance(item, Metric) for item in lst)
+    return False
+
 
 def output(
     source: vs.VideoNode = None,
@@ -260,7 +265,10 @@ def output(
     for index, node in enumerate(clips):
         if operation:
             if isinstance(operation, Metric):
-                node = metrics(reference=source[0], distorted=node, metric=operation) # noqa
+                # hack FIX METRICS FUNCTION
+                node = metrics(reference=node, distorted=source[0], metric=operation) # noqa
+            elif is_list(operation):
+                node = metrics(reference=node, distorted=source[0], metric=operation)
             else:
                 node = operation(node)
 
