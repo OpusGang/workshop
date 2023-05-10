@@ -1,8 +1,11 @@
+import os
 import requests
 import matplotlib.pyplot as plt
 import numpy as np
 import csv
 import seaborn
+import pandas as pd
+import plotly.graph_objects as go
 
 from vstools import vs, core, MatrixT, Matrix, clip_async_render, merge_clip_props
 from awsmfunc import run_scenechange_detect, SceneChangeDetector
@@ -11,7 +14,6 @@ from muvsfunc import SSIM, GMSD
 from enum import Enum
 from functools import partial
 from itertools import cycle
-import pandas as pd
 
 
 class Statistic(Enum):
@@ -74,22 +76,37 @@ def calculate_mean(
 class CSVPropThing:
     def __init__(self, filepath):
         self.filepath = filepath
-
+        self.props_from_csv = []
+        self.scenechanges = []
+        self.palette = seaborn.color_palette('pastel', as_cmap=True)
+        self.colours = cycle(self.palette)
+        
         url = 'https://raw.githubusercontent.com/h4pZ/rose-pine-matplotlib/main/themes/rose-pine-dawn.mplstyle' # noqa
-        style_file = '/tmp/rose-pine.mplstyle'
-        response = requests.get(url)
-        with open(style_file, 'w') as f:
-            f.write(response.text)
+        style_file = 'rose-pine.mplstyle'
 
+        if not os.path.exists(style_file):
+            response = requests.get(url)
+            with open(style_file, 'w') as f:
+                f.write(response.text)
+        
         plt.style.use(style_file)
 
-    def _group_by_scene(self, prop: str | list[str] = 'psnr_y'):
-        df = pd.read_csv(self.filepath)
+    def _fix_inf(self, numbers):
+        try:
+            max_value = max(num for num in numbers if num != float('inf'))
+        except ValueError:
+            return numbers
+
+        return [num if num != float('inf') else max_value for num in numbers]
+
+    def _group_by_scene(self, prop: str | list[str] | Metric = Metric.PSNR):
 
         with open('scenechanges.txt', 'r') as f:
             ranges = [int(line) for line in f.read().splitlines()]
 
         scores = []
+
+        df = pd.read_csv(self.filepath)
 
         for i in range(len(ranges) - 1):
             start = ranges[i]
@@ -101,21 +118,34 @@ class CSVPropThing:
 
             scores.append(mean)
 
-        return scores
+        self.scenechanges = scores
+        return self.scenechanges
 
-    def _read(self, prop: str | list[str] = 'psnr_y'):
-        data_from_csv = []
-
+    def _read(self, prop: str | list[str] | Metric = Metric.PSNR):
+        tmp = []
+        
         with open(self.filepath, mode="r", newline="") as csvfile:
             reader = csv.DictReader(csvfile)
 
             for row in reader:
                 _prop = float(row[f'{prop}'])
-                data_from_csv.append(_prop)
+                tmp.append(_prop)
 
-        return data_from_csv
+        fix_inf = self._fix_inf(tmp)
+        off = np.percentile(fix_inf, 95)
+        fix_out = [i if i <= off else off for i in fix_inf]
+
+        self.props_from_csv = fix_out
+        return self.props_from_csv
     
-    def write(self, clip: vs.VideoNode, async_requests: int = 1, scenechange: bool = True):
+    def write(
+        self,
+        clip: vs.VideoNode, async_requests: int = 1,
+        scenechange: bool = True, overwrite: bool = False
+    ):
+        if not os.path.exists(self.filepath) and overwrite is False:
+            raise ValueError("File exists")
+
         if scenechange:
             run_scenechange_detect(
                 clip,
@@ -139,7 +169,7 @@ class CSVPropThing:
             for row in data:
                 writer.writerow(row)
 
-    def plot(self, prop: str | list[str] = 'psnr_y', per_scene: bool = True):
+    def plot(self, prop: str | list[str] | Metric = Metric.PSNR, per_scene: bool = True):
         if isinstance(prop, str):
             prop = [prop]
 
@@ -152,19 +182,15 @@ class CSVPropThing:
 
         window_size = int(0.05 * len(data[0]))
 
-        _colours = seaborn.color_palette('pastel', as_cmap=True)
-        _palette = cycle(_colours)
-
         for idx, (d, p) in enumerate(zip(data, prop)):
-            palette = next(_palette)
 
             mean = [calculate_mean(d, window_size, statistic) for statistic in Statistic]
 
-            plt.scatter(frames, d, label=p, color=palette, linewidth=0.1)
+            plt.scatter(frames, d, label=p, color=next(self.colours), linewidth=0.1)
 
             plt.plot(
                 frames, mean[3],
-                linestyle='dashed', color=palette,
+                linestyle='dashed', color=next(self.colours),
                 label=f'{p} Harmonic Mean'
                 )
 
@@ -198,43 +224,111 @@ class CSVPropThing:
         plt.legend(loc='upper right')
         plt.show()
 
-    def histogram(self, prop: str | list[str] = 'psnr_y'):
+    def histogram(self, prop: str | list[str] | Metric = Metric.PSNR):
         if isinstance(prop, str):
             prop = [prop]
 
         data = [self._read(prop=p) for p in prop]
 
-        _colours = seaborn.color_palette('pastel', as_cmap=True)
-        _palette = cycle(_colours)
-
         for p, d in zip(prop, data):
-            plt.hist(d, 30, color=next(_palette), label=f'{p}', alpha=0.5, stacked=True)
+            plt.hist(d, 30, color=next(self.colours), label=f'{p}', alpha=0.5, stacked=True)
 
         plt.xlabel('score')
         plt.ylabel('count')
 
         plt.legend(loc='upper right')
         plt.show()
+
+    def web(self, prop: str | list[str] | Metric = Metric.PSNR, per_scene: bool = True):
+
+        if per_scene:
+            data = [self._group_by_scene(prop=p) for p in prop]
+        else:
+            data = [self._read(prop=p) for p in prop]
         
-    def kde(self, prop: str | list[str] = 'psnr_y'):
-        if isinstance(prop, str):
-            prop = [prop]
+        frames = [x for x in range(len(data[0]))]
+        window_size = int(0.05 * len(data[0]))
 
-        data = [self._read(prop=p) for p in prop]
+        fig = go.Figure()
 
-        _colours = seaborn.color_palette('pastel')
-        _palette = cycle(_colours)
+        for idx, (d, p) in enumerate(zip(data, prop)):
+            mean = [calculate_mean(d, window_size, statistic) for statistic in Statistic]
 
-        for p, d in zip(prop, data):
-            seaborn.kdeplot(d, color=next(_palette), label=f'{p}')
+            fig.add_trace(go.Scattergl(
+                x=frames,
+                y=d,
+                mode='markers',
+                name=f'{p}'
+            ))
 
-        plt.xlabel('score')
-        plt.ylabel('count')
+            fig.add_trace(go.Scattergl(
+                x=frames,
+                y=mean[idx],
+                mode='lines',
+                marker=dict(
+                    size=6,
+                ),
+                name=f'{p} Harmonic mean'
+            ))
+            
+            #fig.add_trace(go.Scatter(
+            #    x=frames,
+            #    y=signal.savgol_filter(d, window_size, 3),
+            #    mode='lines',
+            #    marker=dict(
+            #        size=6,
+            #        symbol='triangle-up'
+            #    ),
+            #    name=f'{p} Savitzky-Golay'
+            #))
 
-        plt.legend(loc='upper right')
-        plt.show()
+        #if per_scene:
+        #    with open('scenechanges.txt', 'r') as f:
+        #        numbers = [int(line) for line in f.read().splitlines()]
+#
+        #    ranges = []
+        #    result = []
+#
+        #    for i in range(len(numbers) - 1):
+#
+        #        start = numbers[i]
+        #        end = numbers[i + 1]
+#
+        #        if end >= start:
+        #            ranges.append(range(start, end))
+#
+        #    numbers = [list(r) for r in ranges]
+#
+        #    for num_list in numbers:
+        #        range_str = str(num_list[0]) + "-" + str(num_list[-1])
+        #        result.append(range_str)
+#
+        #    fig.update_layout(
+        #        xaxis = dict(
+        #            tickmode = 'array',
+        #            tickvals = [x for x in range(len(result))],
+        #            ticktext = result,
+        #            tickangle=-45
+        #        ),
+        #        font=dict(size=4)
+        #    )
 
-
+        fig.update_layout(
+            template='seaborn',
+            legend_title="Legend Title",
+            xaxis_title="frames",
+            yaxis_title="score",
+            xaxis=dict(
+                rangeslider=dict(
+                    visible=True
+                    )
+                ),
+            yaxis=dict(fixedrange=False),
+            )
+        
+        fig.show()
+    
+    
 def _PlaneSSIMTransfer(
     n: int, f: list[vs.VideoFrame],
     clip: vs.VideoNode,
