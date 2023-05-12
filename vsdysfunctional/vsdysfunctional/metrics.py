@@ -6,6 +6,7 @@ import csv
 import seaborn
 import pandas as pd
 import plotly.graph_objects as go
+import warnings
 
 from vstools import vs, core, MatrixT, Matrix, clip_async_render, merge_clip_props
 from awsmfunc import run_scenechange_detect, SceneChangeDetector
@@ -14,6 +15,10 @@ from muvsfunc import SSIM, GMSD
 from enum import Enum
 from functools import partial
 from itertools import cycle
+from scipy.signal import savgol_filter
+from scipy.stats import hmean, pmean
+from statistics import mean, median
+
 
 
 class Statistic(Enum):
@@ -45,6 +50,53 @@ class Metric(Enum):
 
     def __iter__(self):
         return iter(self.prop)
+
+
+class Smooth:
+    @staticmethod
+    def Savgol(polyorder=None):
+
+        def fun(data, window_length):
+            return savgol_filter(data, window_length, polyorder)
+
+        if polyorder is None:
+            polyorder = 3
+
+        fun.__name__ = 'Savitzky-Golay'
+        return fun
+
+    @staticmethod
+    def HMean():
+        f = partial(hmean)
+        f.__name__ = 'Harmonic mean'
+        return f
+
+    @staticmethod
+    def PMean(p=1):
+        f = partial(pmean, p=p)
+        f.__name__ = 'Power mean'
+        return f
+    
+    @staticmethod
+    def Mean():
+        f = partial(pmean)
+        f.__name__ = 'Mean'
+        return f
+    
+    @staticmethod
+    def Median():
+        f = partial(pmean)
+        f.__name__ = 'Median'
+        return f
+    
+
+
+def rolling_average(data, window, func):
+    if func.__name__ == 'Savitzky-Golay':
+        return func(data, window,)
+
+    data = pd.Series(data)
+    return data.rolling(window).apply(func, raw=True)
 
 
 def calculate_mean(
@@ -135,8 +187,7 @@ class CSVPropThing:
         off = np.percentile(fix_inf, 95)
         fix_out = [i if i <= off else off for i in fix_inf]
 
-        self.props_from_csv = fix_out
-        return self.props_from_csv
+        return fix_out
     
     def write(
         self,
@@ -229,7 +280,7 @@ class CSVPropThing:
             prop = [prop]
 
         data = [self._read(prop=p) for p in prop]
-
+        print(data)
         for p, d in zip(prop, data):
             plt.hist(d, 30, color=next(self.colours), label=f'{p}', alpha=0.5, stacked=True)
 
@@ -239,83 +290,59 @@ class CSVPropThing:
         plt.legend(loc='upper right')
         plt.show()
 
-    def web(self, prop: str | list[str] | Metric = Metric.PSNR, per_scene: bool = True):
+    def web(
+        self,
+        prop: str | list[str] | Metric = Metric.PSNR,
+        per_scene: bool = True,
+        smoothmode: list[Smooth] = [Smooth.HMean(), Smooth.Savgol(polyorder=3)]
+    ):
+        if isinstance(prop, str):
+            prop = [prop]
+
+        if isinstance(smoothmode, Smooth):
+            smoothmode = [smoothmode]
 
         if per_scene:
             data = [self._group_by_scene(prop=p) for p in prop]
         else:
             data = [self._read(prop=p) for p in prop]
+            warnings.warn("Loading may be slow for large datasets")
         
         frames = [x for x in range(len(data[0]))]
-        window_size = int(0.05 * len(data[0]))
+        window_size = int(0.10 * len(data[0]))
 
         fig = go.Figure()
 
         for idx, (d, p) in enumerate(zip(data, prop)):
-            mean = [calculate_mean(d, window_size, statistic) for statistic in Statistic]
 
             fig.add_trace(go.Scattergl(
                 x=frames,
                 y=d,
+                legendgroup="raw",
+                legendgrouptitle_text=f"Raw data",
                 mode='markers',
                 name=f'{p}'
+
             ))
 
-            fig.add_trace(go.Scattergl(
+            for method in smoothmode:
+                fig.add_trace(go.Scatter(
                 x=frames,
-                y=mean[idx],
+                y=rolling_average(d, window_size, method),
+                legendgroup=f"{method}",
+                legendgrouptitle_text=f"{method.__name__}",
+                legendrank=1001,
                 mode='lines',
                 marker=dict(
                     size=6,
+                    symbol='triangle-up'
                 ),
-                name=f'{p} Harmonic mean'
-            ))
-            
-            #fig.add_trace(go.Scatter(
-            #    x=frames,
-            #    y=signal.savgol_filter(d, window_size, 3),
-            #    mode='lines',
-            #    marker=dict(
-            #        size=6,
-            #        symbol='triangle-up'
-            #    ),
-            #    name=f'{p} Savitzky-Golay'
-            #))
-
-        #if per_scene:
-        #    with open('scenechanges.txt', 'r') as f:
-        #        numbers = [int(line) for line in f.read().splitlines()]
-#
-        #    ranges = []
-        #    result = []
-#
-        #    for i in range(len(numbers) - 1):
-#
-        #        start = numbers[i]
-        #        end = numbers[i + 1]
-#
-        #        if end >= start:
-        #            ranges.append(range(start, end))
-#
-        #    numbers = [list(r) for r in ranges]
-#
-        #    for num_list in numbers:
-        #        range_str = str(num_list[0]) + "-" + str(num_list[-1])
-        #        result.append(range_str)
-#
-        #    fig.update_layout(
-        #        xaxis = dict(
-        #            tickmode = 'array',
-        #            tickvals = [x for x in range(len(result))],
-        #            ticktext = result,
-        #            tickangle=-45
-        #        ),
-        #        font=dict(size=4)
-        #    )
-
+                name=f'{p}'
+                ))
+        ### ADD THING TO SHOW REAL FRAME NUMBER ON HOVER
         fig.update_layout(
             template='seaborn',
-            legend_title="Legend Title",
+            legend_title="Data points",
             xaxis_title="frames",
             yaxis_title="score",
             xaxis=dict(
@@ -323,9 +350,10 @@ class CSVPropThing:
                     visible=True
                     )
                 ),
+            legend=dict(groupclick="toggleitem"),
             yaxis=dict(fixedrange=False),
             )
-        
+
         fig.show()
     
     
