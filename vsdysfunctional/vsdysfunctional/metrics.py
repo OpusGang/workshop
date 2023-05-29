@@ -7,40 +7,36 @@ import seaborn
 import pandas as pd
 import plotly.graph_objects as go
 import warnings
+from vsrgtools import MeanMode
 
-from vstools import vs, core, MatrixT, Matrix, clip_async_render, merge_clip_props
+from vstools import fallback, mod_x, vs, core, MatrixT, Matrix, clip_async_render, merge_clip_props
 from awsmfunc import run_scenechange_detect, SceneChangeDetector
 from muvsfunc import SSIM, GMSD
+from mvsfunc import PlaneCompare, PlaneStatistics
 
 from enum import Enum
 from functools import partial
 from itertools import cycle
 from scipy.signal import savgol_filter
 from scipy.stats import hmean, pmean
-from statistics import mean, median
+from statistics import geometric_mean, mean, median
 
+class ColourSpace(Enum):
+    YCBCR = 0
+    RGB = 1
 
-
-class Statistic(Enum):
-    MEAN = 'mean'
-    GEOMETRIC_MEAN = 'geometric_mean'
-    GROUPED_MEDIAN = 'grouped_median'
-    HARMONIC_MEAN = 'harmonic_mean'
-
-
-class Metric(Enum):
+class Complex(Enum):
     PSNR = (0, ['psnr_y', 'psnr_cb', 'psnr_cr'])
     PSNR_HVS = (1, ['psnr_hvs', 'psnr_hvs_y', 'psnr_hvs_cb', 'psnr_hvs_cr'])
-    SSIM = (2, ['Y_SSIM', 'Cb_SSIM', 'Cr_SSIM'])
+    SSIM = (2, ['SSIM_Y', 'SSIM_Cb', 'SSIM_Cr'])
     SSIM_MS = (3, ['float_ms_ssim'])
     CIEDE = (4, ['ciede2000'])
     SSIMULACRA1 = (5, ['_SSIMULACRA1'])
     SSIMULACRA2 = (6, ['_SSIMULACRA2'])
     BUTTER = (7, ['_FrameButteraugli'])
-    GMSD = (8, ['Y_GMSD', 'Cb_GMSD', 'Cr_GMSD'])
+    GMSD = (8, ['GMSD_Y', 'GMSD_Cb', 'GMSD_Cr'])
+    WADIQAM = (9, ['Frame_WaDIQaM_FR'])
 
-    # todo calc psnr from (0.8 * PSNR_Y) + (0.1 * PSNR_Cb) + (0.1 * PSNR_Cr)
-    # _psnr = lambda psnr: (0.8 * psnr[0]) + (0.1 * psnr[1]) + (0.1 * psnr[2])
     def __init__(self, value, prop):
         self._value_ = value
         self.prop = prop
@@ -52,15 +48,50 @@ class Metric(Enum):
         return iter(self.prop)
 
 
+class Simple(Enum):
+    MAE = (0, ['PlaneMAE_Y', 'PlaneMAE_Cb', 'PlaneMAE_Cr'])
+    RMSE = (1, ['PlaneRMSE_Y', 'PlaneRMSE_Cb', 'PlaneRMSE_Cr'])
+    COVARIANCE = (2, ['PlaneCov_Y', 'PlaneCov_Cb', 'PlaneCov_Cr'])
+    CORRELATION = (3, ['PlaneCorr_Y', 'PlaneCorr_Cb', 'PlaneCorr_Cr'])
+
+    def __init__(self, value, prop):
+        self._value_ = value
+        self.prop = prop
+
+    def __int__(self):
+        return self.value
+
+    def __iter__(self):
+        return iter(self.prop)
+
+
+class NoRef(Enum):
+    CAMBI = (0, ['CAMBI'])
+    WADIQAM = (1, ['Frame_WaDIQaM_NR'])
+
+    def __init__(self, value, prop):
+        self._value_ = value
+        self.prop = prop
+
+    def __int__(self):
+        return self.value
+
+    def __iter__(self):
+        return iter(self.prop)
+
+
+class Metric:
+    class FullRef:
+        Simple = Simple
+        Complex = Complex
+        NoRef = NoRef
+
+
 class Smooth:
     @staticmethod
-    def Savgol(polyorder=None):
-
-        def fun(data, window_length):
+    def Savgol(polyorder: int = 3):
+        def fun(data: list[int | float], window_length: int):
             return savgol_filter(data, window_length, polyorder)
-
-        if polyorder is None:
-            polyorder = 3
 
         fun.__name__ = 'Savitzky-Golay'
         return fun
@@ -72,57 +103,28 @@ class Smooth:
         return f
 
     @staticmethod
-    def PMean(p=1):
+    def PMean(p: int = 1):
         f = partial(pmean, p=p)
         f.__name__ = 'Power mean'
         return f
-    
+
     @staticmethod
-    def Mean():
-        f = partial(pmean)
-        f.__name__ = 'Mean'
+    def GMean():
+        f = partial(geometric_mean)
+        f.__name__ = 'Geometric Mean'
+        return f
+
+    @staticmethod
+    def AMean():
+        f = partial(mean)
+        f.__name__ = 'Arithmetic Mean'
         return f
     
     @staticmethod
     def Median():
-        f = partial(pmean)
+        f = partial(median)
         f.__name__ = 'Median'
         return f
-    
-
-
-def rolling_average(data, window, func):
-    if func.__name__ == 'Savitzky-Golay':
-        return func(data, window,)
-
-    data = pd.Series(data)
-    return data.rolling(window).apply(func, raw=True)
-
-
-def calculate_mean(
-    y: list[float],
-    window_size: int,
-    statistic: Statistic
-) -> list[float]:
-
-    result = []
-    y = np.array(y)
-
-    for i, in np.ndindex(y.shape):
-        start = max(0, i - window_size)
-        end = min(len(y), i + window_size + 1)
-        window = y[start:end]
-
-        if statistic == Statistic.MEAN:
-            result.append(sum(window) / len(window))
-        elif statistic == Statistic.GEOMETRIC_MEAN:
-            result.append(np.prod(window) ** (1 / len(window)))
-        elif statistic == Statistic.GROUPED_MEDIAN:
-            result.append(np.median(window))
-        elif statistic == Statistic.HARMONIC_MEAN:
-            result.append(len(window) / np.sum(1.0 / window))
-
-    return result
 
 
 class CSVPropThing:
@@ -132,6 +134,11 @@ class CSVPropThing:
         self.scenechanges = []
         self.palette = seaborn.color_palette('pastel', as_cmap=True)
         self.colours = cycle(self.palette)
+        self.scene_data = []
+        self.read_data = []
+        self.frames = None
+        self.window_size = None
+        self.ranges = None
         
         url = 'https://raw.githubusercontent.com/h4pZ/rose-pine-matplotlib/main/themes/rose-pine-dawn.mplstyle' # noqa
         style_file = 'rose-pine.mplstyle'
@@ -143,6 +150,13 @@ class CSVPropThing:
         
         plt.style.use(style_file)
 
+    def _rolling_average(self, data: list[int | float], window: int, func):
+        if func.__name__ == 'Savitzky-Golay':
+            return func(data, window)
+
+        data = pd.Series(data)
+        return data.rolling(window).apply(func, raw=True)
+
     def _fix_inf(self, numbers):
         try:
             max_value = max(num for num in numbers if num != float('inf'))
@@ -151,29 +165,21 @@ class CSVPropThing:
 
         return [num if num != float('inf') else max_value for num in numbers]
 
-    def _group_by_scene(self, prop: str | list[str] | Metric = Metric.PSNR):
+    def _group_by_scene(self, prop: str | list[str] | Metric = Metric.FullRef.Complex.PSNR):
 
         with open('scenechanges.txt', 'r') as f:
-            ranges = [int(line) for line in f.read().splitlines()]
-
-        scores = []
+            ranges = [int(line) for line in f]
 
         df = pd.read_csv(self.filepath)
 
-        for i in range(len(ranges) - 1):
-            start = ranges[i]
-            end = ranges[i + 1] - 1
+        start_end = [[ranges[i], ranges[i+1]-1] for i in range(len(ranges)-1)]
+        scores = [df.iloc[start:end][prop].median() for (start,end) in start_end]
 
-            df_subset = df.iloc[start:end]
-
-            mean = df_subset[f'{prop}'].median()
-
-            scores.append(mean)
-
+        self.ranges = start_end
         self.scenechanges = scores
         return self.scenechanges
 
-    def _read(self, prop: str | list[str] | Metric = Metric.PSNR):
+    def _read(self, prop: str | list[str] | Metric = Metric.FullRef.Complex.PSNR):
         tmp = []
         
         with open(self.filepath, mode="r", newline="") as csvfile:
@@ -191,15 +197,16 @@ class CSVPropThing:
     
     def write(
         self,
-        clip: vs.VideoNode, async_requests: int = 1,
-        scenechange: bool = True, overwrite: bool = False
+        clip: vs.VideoNode, scenechange_clip: vs.VideoNode = None,
+        async_requests: int = 1, scenechange: bool = True,
+        overwrite: bool = False
     ):
-        if not os.path.exists(self.filepath) and overwrite is False:
+        if os.path.exists(self.filepath) and overwrite is False:
             raise ValueError("File exists")
 
-        if scenechange:
+        if scenechange:     # change this so scenechange and props are collected at the same time
             run_scenechange_detect(
-                clip,
+                clip=fallback(scenechange_clip, clip),
                 tonemap=False, output='scenechanges.txt',
                 detector=SceneChangeDetector.AvScenechange
                 )
@@ -220,67 +227,12 @@ class CSVPropThing:
             for row in data:
                 writer.writerow(row)
 
-    def plot(self, prop: str | list[str] | Metric = Metric.PSNR, per_scene: bool = True):
-        if isinstance(prop, str):
-            prop = [prop]
-
-        if per_scene:
-            data = [self._group_by_scene(prop=p) for p in prop]
-        else:
-            data = [self._read(prop=p) for p in prop]
-
-        frames = range(len(data[0]))
-
-        window_size = int(0.05 * len(data[0]))
-
-        for idx, (d, p) in enumerate(zip(data, prop)):
-
-            mean = [calculate_mean(d, window_size, statistic) for statistic in Statistic]
-
-            plt.scatter(frames, d, label=p, color=next(self.colours), linewidth=0.1)
-
-            plt.plot(
-                frames, mean[3],
-                linestyle='dashed', color=next(self.colours),
-                label=f'{p} Harmonic Mean'
-                )
-
-        plt.xlabel('scene' if per_scene else 'frame')
-        plt.ylabel('score')
-
-        if per_scene:
-            with open('scenechanges.txt', 'r') as f:
-                numbers = [int(line) for line in f.read().splitlines()]
-
-            ranges = []
-            result = []
-
-            for i in range(len(numbers) - 1):
-
-                start = numbers[i]
-                end = numbers[i + 1]
-
-                if end >= start:
-                    ranges.append(range(start, end))
-
-            numbers = [list(r) for r in ranges]
-
-            for num_list in numbers:
-                range_str = str(num_list[0]) + "-" + str(num_list[-1])
-                result.append(range_str)
-
-            plt.xticks(ticks=[x for x in range(len(result))], labels=result)
-            plt.xticks(rotation=-45, fontsize=8)
-
-        plt.legend(loc='upper right')
-        plt.show()
-
-    def histogram(self, prop: str | list[str] | Metric = Metric.PSNR):
+    def histogram(self, prop: str | list[str] | Metric = Metric.FullRef.Complex.PSNR):
         if isinstance(prop, str):
             prop = [prop]
 
         data = [self._read(prop=p) for p in prop]
-        print(data)
+
         for p, d in zip(prop, data):
             plt.hist(d, 30, color=next(self.colours), label=f'{p}', alpha=0.5, stacked=True)
 
@@ -290,56 +242,65 @@ class CSVPropThing:
         plt.legend(loc='upper right')
         plt.show()
 
-    def web(
+    def plot(
         self,
-        prop: str | list[str] | Metric = Metric.PSNR,
+        prop: str | list[str] | Metric = Metric.FullRef.Complex.PSNR,
         per_scene: bool = True,
-        smoothmode: list[Smooth] = [Smooth.HMean(), Smooth.Savgol(polyorder=3)]
+        smoothmode: list[Smooth] = [Smooth.Savgol(polyorder=3), Smooth.HMean()]
     ):
         if isinstance(prop, str):
             prop = [prop]
-
+        # broken lol
         if isinstance(smoothmode, Smooth):
             smoothmode = [smoothmode]
 
-        if per_scene:
-            data = [self._group_by_scene(prop=p) for p in prop]
-        else:
-            data = [self._read(prop=p) for p in prop]
+        self.scene_data = [self._group_by_scene(prop=p) for p in prop]
+
+        self.read_data = [self._read(prop=p) for p in prop]
+
+        data = self.scene_data if per_scene else self.read_data
+
+        if not per_scene:
             warnings.warn("Loading may be slow for large datasets")
-        
-        frames = [x for x in range(len(data[0]))]
-        window_size = int(0.10 * len(data[0]))
+
+        self.frames = list(range(len(data[0])))
+        self.window_size = int(0.10 * len(data[0]))
 
         fig = go.Figure()
 
         for idx, (d, p) in enumerate(zip(data, prop)):
-
             fig.add_trace(go.Scattergl(
-                x=frames,
+                x=self.frames,
                 y=d,
                 legendgroup="raw",
                 legendgrouptitle_text=f"Raw data",
                 mode='markers',
-                name=f'{p}'
-
+                name=f'{p}',
+                text=self.ranges,
+                customdata=[[f'{p}']] * len(self.frames),
+                hovertemplate='%{customdata} = %{y}<br>scene = %{x}<br>frames = %{text}<extra></extra>'
             ))
 
             for method in smoothmode:
                 fig.add_trace(go.Scatter(
-                x=frames,
-                y=rolling_average(d, window_size, method),
+                x=self.frames,
+                y=self._rolling_average(d, self.window_size, method),
+                visible=True if method.__name__ == 'Savitzky-Golay' else 'legendonly',
                 legendgroup=f"{method}",
                 legendgrouptitle_text=f"{method.__name__}",
                 legendrank=1001,
                 mode='lines',
-                marker=dict(
-                    size=6,
-                    symbol='triangle-up'
-                ),
-                name=f'{p}'
+                marker=dict(size=6),
+                name=f'{p}',
+                customdata=[[f'{p}']] * len(self.frames),
+                text=[method.__name__] * len(self.frames),
+                hovertemplate='%{customdata} = %{y}<br>scene = %{x}<br>method: %{text}<extra></extra>'
                 ))
-        ### ADD THING TO SHOW REAL FRAME NUMBER ON HOVER
+
+        ### PRINT EXISTING PROPS ON ERROR???
+        ### VALUEERROR(PROP 'Y_SSIM' DOES NOT EXIST)
+        ### VALID PROPS = [_FRAMENUM, _FRAMETYPE, _CAMBI]
+        ### TYPERROR ONLY INT AND FLOAT TYPE ACCEPTED
         fig.update_layout(
             template='seaborn',
             legend_title="Data points",
@@ -350,77 +311,104 @@ class CSVPropThing:
                     visible=True
                     )
                 ),
-            legend=dict(groupclick="toggleitem"),
             yaxis=dict(fixedrange=False),
+            legend=dict(groupclick="toggleitem")
             )
 
         fig.show()
     
     
-def _PlaneSSIMTransfer(
+def _prop_transfer(
     n: int, f: list[vs.VideoFrame],
     clip: vs.VideoNode,
     src_prop: str = 'PlaneSSIM',
     out_prop: str = 'SSIM'
 ) -> vs.VideoFrame:
+    if clip.format.color_family == vs.YUV:
+        postfix = ['_Y', '_Cb', '_Cr']
+    else:
+        postfix = ['_R', '_G', '_B']
 
     props = {}
     for i in range(3):
         prop_value = f[i].props[f'{src_prop}']
-        prefix = ['Y_', 'Cb_', 'Cr_'][i]
-        props[f"{prefix}{out_prop}"] = prop_value
+        props[f"{out_prop}{postfix[i]}"] = prop_value
 
     return clip.std.SetFrameProps(**props)
 
 
-def metrics(
+def calc_diff(
     reference: vs.VideoNode,
     distorted: vs.VideoNode,
-    metric: Metric = Metric.SSIM_MS,
+    downsample: bool = True,
+    metric: Metric = Metric.FullRef.Complex.SSIM_MS,
     matrix: MatrixT = Matrix.BT709,
+    model_path: str = None,
     **args
 ) -> vs.VideoNode:
-
-    if metric in (Metric.PSNR, Metric.PSNR_HVS, Metric.SSIM, Metric.SSIM_MS, Metric.GMSD):
+    
+    if downsample:
+        resample_args = reference.width // 2, reference.height // 2
+    
+    if metric in (Metric.FullRef.Complex.PSNR, Metric.FullRef.Complex.PSNR_HVS, Metric.FullRef.Complex.SSIM, Metric.FullRef.Complex.SSIM_MS, Metric.FullRef.Complex.GMSD):
         if reference.format.color_family != vs.YUV:
-            _reference, _distorted = [core.resize.Spline64(
-                i, format=vs.YUV420P12, matrix=matrix, dither_type='error_diffusion'
-                ) for i in (reference, distorted)]
+            _reference, _distorted = [
+                core.resize.Spline64(i, format=vs.YUV420P12, matrix=matrix, dither_type='error_diffusion', *resample_args)
+                for i in (reference, distorted)
+            ]
         else:
             _reference, _distorted = reference, distorted
-
-        if metric == Metric.SSIM:
+            
+        if metric == Metric.FullRef.Complex.SSIM:
             ssim = [SSIM(clip1=_reference, clip2=_distorted, plane=i) for i in range(3)]
-            measure = core.std.FrameEval(
-                _reference, prop_src=ssim,
-                eval=partial(_PlaneSSIMTransfer, clip=reference, src_prop='PlaneSSIM', out_prop='SSIM')
-                )
+            measure = _reference.std.FrameEval(
+                prop_src=ssim, eval=partial(_prop_transfer, clip=reference, src_prop='PlaneSSIM', out_prop='SSIM'))
 
-        elif metric == Metric.GMSD:
+        elif metric == Metric.FullRef.Complex.GMSD:
             gmsd = [GMSD(clip1=_reference, clip2=_distorted, plane=i) for i in range(3)]
-            measure = core.std.FrameEval(
-                _reference, prop_src=gmsd,
-                eval=partial(_PlaneSSIMTransfer, clip=_reference, src_prop='PlaneGMSD', out_prop='GMSD')
-                )
+            measure = _reference.std.FrameEval(
+                prop_src=gmsd, eval=partial(_prop_transfer, clip=_reference, src_prop='PlaneGMSD', out_prop='GMSD'))
         else:
             measure = core.vmaf.Metric(reference=_reference, distorted=_distorted, feature=metric.value)
 
-    elif metric in (Metric.SSIMULACRA1, Metric.SSIMULACRA2, Metric.BUTTER):
+    elif metric in (Metric.FullRef.Complex.SSIMULACRA1, Metric.FullRef.Complex.SSIMULACRA2, Metric.FullRef.Complex.BUTTER, Metric.FullRef.Complex.WADIQAM):
         if reference.format.color_family != vs.RGB:
-            _reference, _distorted = [core.resize.Spline64(
-                i, format=vs.RGB24, matrix_in=matrix, dither_type='error_diffusion'
-                ) for i in (reference, distorted)]
+            _reference, _distorted = [
+                core.resize.Spline64(i, format=vs.RGB48, matrix_in=matrix, dither_type='error_diffusion', *resample_args)
+                for i in (reference, distorted)
+            ]
         else:
             _reference, _distorted = reference, distorted
-
-        if metric == Metric.SSIMULACRA1:
+            
+        if metric == Metric.FullRef.Complex.SSIMULACRA1:
             measure = core.julek.SSIMULACRA(reference=_reference, distorted=_distorted, feature=1, **args)
-        elif metric == Metric.SSIMULACRA2:
+            
+        elif metric == Metric.FullRef.Complex.SSIMULACRA2:
             measure = core.julek.SSIMULACRA(reference=_reference, distorted=_distorted, feature=0, **args)
-        elif metric == Metric.BUTTER:
+            
+        elif metric == Metric.FullRef.Complex.BUTTER:
             measure = core.julek.Butteraugli(reference=_reference, distorted=_distorted, **args)
- 
+
+        elif metric == Metric.FullRef.Complex.WADIQAM:
+            import chainer
+            from vs_wadiqam_chainer import wadiqam_fr,
+
+            if model_path is None:
+                raise ValueError("model_path is required for WADIQAM")
+            
+            rw = [mod_x(i, 32) for i in (_reference.height, _reference.width)]            
+            _reference, _distorted = [c.resize.Lanczos(rw[0], rw[1]) for c in (_reference, _distorted)]
+
+            measure = wadiqam_fr(_reference, _distorted, model_folder_path=model_path, dataset='tid', top='patchwise', max_batch_size=2040)
+
+        measure = measure.std.SetFrameProp(prop='_Matrix', intval=matrix)
+
     else:
-        measure = core.std.PlaneStats(reference, distorted, **args)
- 
+        print("asdasdas")
+    #elif metric in (Metric.FullRef.Simple):
+    #    if metric == Metric.FullRef.Simple.CORRELATION:
+    #        measure = PlaneCompare(clip1=_reference, clip2=_distorted)
+    #else:
+    #    measure = core.std.PlaneStats(reference, distorted, **args)
+
     return merge_clip_props(reference, measure)
