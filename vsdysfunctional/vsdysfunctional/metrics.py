@@ -1,4 +1,5 @@
 import os
+from weakref import ref
 import requests
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,7 +8,6 @@ import seaborn
 import pandas as pd
 import plotly.graph_objects as go
 import warnings
-from vsrgtools import MeanMode
 
 from vstools import fallback, mod_x, vs, core, MatrixT, Matrix, clip_async_render, merge_clip_props
 from awsmfunc import run_scenechange_detect, SceneChangeDetector
@@ -21,9 +21,24 @@ from scipy.signal import savgol_filter
 from scipy.stats import hmean, pmean
 from statistics import geometric_mean, mean, median
 
+
+class ReductionMode:
+    class Crop:
+        def __init__(self, percentage):
+            self.percentage = percentage
+            
+    class Downsample:
+        def __init__(self, percentage):
+            self.percentage = percentage
+
+    class Fun:
+        pass
+
+
 class ColourSpace(Enum):
     YCBCR = 0
     RGB = 1
+
 
 class Complex(Enum):
     PSNR = (0, ['psnr_y', 'psnr_cb', 'psnr_cr'])
@@ -90,8 +105,9 @@ class Metric:
 class Smooth:
     @staticmethod
     def Savgol(polyorder: int = 3):
+        # FIX THIS YOU FUCKING RETARD
         def fun(data: list[int | float], window_length: int):
-            return savgol_filter(data, window_length, polyorder)
+            return savgol_filter(data, 10, polyorder)
 
         fun.__name__ = 'Savitzky-Golay'
         return fun
@@ -340,20 +356,82 @@ def _prop_transfer(
 def calc_diff(
     reference: vs.VideoNode,
     distorted: vs.VideoNode,
-    downsample: bool = True,
+    reduce: ReductionMode | None = ReductionMode.Fun(),
     metric: Metric = Metric.FullRef.Complex.SSIM_MS,
     matrix: MatrixT = Matrix.BT709,
     model_path: str = None,
     **args
 ) -> vs.VideoNode:
     
-    if downsample:
-        resample_args = reference.width // 2, reference.height // 2
-    
-    if metric in (Metric.FullRef.Complex.PSNR, Metric.FullRef.Complex.PSNR_HVS, Metric.FullRef.Complex.SSIM, Metric.FullRef.Complex.SSIM_MS, Metric.FullRef.Complex.GMSD):
+    if isinstance(reduce, ReductionMode.Crop):
+
+        crop_left_right = int(reference.width * (reduce.percentage / 2) / 100)
+        crop_top_bottom = int(reference.height * (reduce.percentage / 2) / 100)
+
+        crop_left_right, crop_top_bottom = [
+            i + (4 - i % 4) % 4 for i in [crop_left_right, crop_top_bottom]
+        ]
+
+        reference, distorted = [
+            clip.std.Crop(
+                left=crop_left_right,
+                right=crop_left_right,
+                top=crop_top_bottom,
+                bottom=crop_top_bottom
+                ) for clip in (reference, distorted)
+        ]
+
+    elif isinstance(reduce, ReductionMode.Downsample):
+
+        new_width = reference.width - 2 * int(reference.width * (reduce.percentage / 2) / 100)
+        new_height = reference.height - 2 * int(reference.height * (reduce.percentage / 2) / 100)
+
+        new_width -= new_width % 4
+        new_height -= new_height % 4
+
+        reference, distorted = [
+            clip.resize.Spline64(new_width, new_height)
+            for clip in (reference, distorted)
+        ]
+
+    if isinstance(reduce, ReductionMode.Fun):
+
+        for clip in [reference, distorted]:
+
+            crop_width = clip.width // 2
+            crop_height = clip.height // 2
+
+            clips = []
+
+            corners = [
+                (0, crop_width, 0, crop_height),  # top left
+                (crop_width, 0, 0, crop_height),  # top right
+                (crop_width, 0, crop_height, 0),  # bottom right
+                (0, crop_width, crop_height, 0)   # bottom left
+            ]
+
+            for corner in corners:
+                cropped_clip = clip[::4].std.Crop(
+                    left=corner[0], right=corner[1],
+                    top=corner[2], bottom=corner[3]
+                )
+                clips.append(cropped_clip)
+
+            if clip is reference:
+                reference = core.std.Interleave(clips)
+            else:
+                distorted = core.std.Interleave(clips)
+
+    if metric in (
+        Metric.FullRef.Complex.PSNR,
+        Metric.FullRef.Complex.PSNR_HVS,
+        Metric.FullRef.Complex.SSIM,
+        Metric.FullRef.Complex.SSIM_MS,
+        Metric.FullRef.Complex.GMSD
+    ):
         if reference.format.color_family != vs.YUV:
             _reference, _distorted = [
-                core.resize.Spline64(i, format=vs.YUV420P12, matrix=matrix, dither_type='error_diffusion', *resample_args)
+                core.resize.Spline64(i, format=vs.YUV420P12, matrix=matrix, dither_type='error_diffusion')
                 for i in (reference, distorted)
             ]
         else:
@@ -371,10 +449,16 @@ def calc_diff(
         else:
             measure = core.vmaf.Metric(reference=_reference, distorted=_distorted, feature=metric.value)
 
-    elif metric in (Metric.FullRef.Complex.SSIMULACRA1, Metric.FullRef.Complex.SSIMULACRA2, Metric.FullRef.Complex.BUTTER, Metric.FullRef.Complex.WADIQAM):
+    elif metric in (
+        Metric.FullRef.Complex.SSIMULACRA1,
+        Metric.FullRef.Complex.SSIMULACRA2,
+        Metric.FullRef.Complex.BUTTER,
+        Metric.FullRef.Complex.WADIQAM
+    ):
+
         if reference.format.color_family != vs.RGB:
             _reference, _distorted = [
-                core.resize.Spline64(i, format=vs.RGB48, matrix_in=matrix, dither_type='error_diffusion', *resample_args)
+                core.resize.Spline64(i, format=vs.RGB48, matrix_in=matrix, dither_type='error_diffusion')
                 for i in (reference, distorted)
             ]
         else:
@@ -390,25 +474,46 @@ def calc_diff(
             measure = core.julek.Butteraugli(reference=_reference, distorted=_distorted, **args)
 
         elif metric == Metric.FullRef.Complex.WADIQAM:
-            import chainer
-            from vs_wadiqam_chainer import wadiqam_fr,
+            from vs_wadiqam_chainer import wadiqam_fr
 
             if model_path is None:
                 raise ValueError("model_path is required for WADIQAM")
             
             rw = [mod_x(i, 32) for i in (_reference.height, _reference.width)]            
-            _reference, _distorted = [c.resize.Lanczos(rw[0], rw[1]) for c in (_reference, _distorted)]
+            _reference, _distorted = [c.resize.Spline64(rw[0], rw[1]) for c in (_reference, _distorted)]
 
             measure = wadiqam_fr(_reference, _distorted, model_folder_path=model_path, dataset='tid', top='patchwise', max_batch_size=2040)
 
         measure = measure.std.SetFrameProp(prop='_Matrix', intval=matrix)
 
-    else:
-        print("asdasdas")
-    #elif metric in (Metric.FullRef.Simple):
-    #    if metric == Metric.FullRef.Simple.CORRELATION:
-    #        measure = PlaneCompare(clip1=_reference, clip2=_distorted)
-    #else:
-    #    measure = core.std.PlaneStats(reference, distorted, **args)
 
+    elif metric in Metric.FullRef.Simple:
+
+        enum_map = {
+            Simple.MAE: ('mae', 'PlaneMAE'),
+            Simple.RMSE: ('rmse', 'PlaneRMSE'),
+            Simple.COVARIANCE: ('cov', 'PlaneCov'),
+            Simple.CORRELATION: ('corr', 'PlaneCorr')
+        }
+
+        _metrics = {
+            'mae':  False,
+            'rmse': False,
+            'cov':  False,
+            'corr': False,
+            'psnr': False,
+        }
+
+        key, prop = enum_map[metric]
+        if key in _metrics:
+            _metrics[key] = True    
+        
+            simple = [PlaneCompare(clip1=reference, clip2=distorted, plane=i, **_metrics) for i in range(3)]
+            measure = reference.std.FrameEval(
+                prop_src=simple, eval=partial(_prop_transfer, clip=reference, src_prop=f'{prop}', out_prop=f'{prop[5:]}'))
+
+    else:
+        measure = core.std.PlaneStats(reference, distorted, **args)
+
+    print(f'internal res: {measure.width, measure.height}')
     return merge_clip_props(reference, measure)
