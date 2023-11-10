@@ -9,10 +9,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import warnings
 
-from vstools import fallback, mod_x, vs, core, MatrixT, Matrix, clip_async_render, merge_clip_props
+from vstools import Transfer, VSFunction, DitherType, fallback, mod_x, vs, core, MatrixT, Matrix, ColorRange, clip_async_render, merge_clip_props
 from awsmfunc import run_scenechange_detect, SceneChangeDetector
 from muvsfunc import SSIM, GMSD
-from mvsfunc import PlaneCompare, PlaneStatistics
+from mvsfunc import PlaneCompare
 
 from enum import Enum
 from functools import partial
@@ -31,7 +31,7 @@ class ReductionMode:
         def __init__(self, percentage):
             self.percentage = percentage
 
-    class Fun:
+    class Hybrid:
         pass
 
 
@@ -48,9 +48,10 @@ class Complex(Enum):
     CIEDE = (4, ['ciede2000'])
     SSIMULACRA1 = (5, ['_SSIMULACRA1'])
     SSIMULACRA2 = (6, ['_SSIMULACRA2'])
-    BUTTER = (7, ['_FrameButteraugli'])
+    BUTTERAUGLI = (7, ['_FrameBUTTERAUGLIaugli'])
     GMSD = (8, ['GMSD_Y', 'GMSD_Cb', 'GMSD_Cr'])
     WADIQAM = (9, ['Frame_WaDIQaM_FR'])
+    MDSI = (10, ['FrameMDSI'])
 
     def __init__(self, value, prop):
         self._value_ = value
@@ -99,15 +100,19 @@ class Metric:
     class FullRef:
         Simple = Simple
         Complex = Complex
-        NoRef = NoRef
+    
+    class NoRef:
+        CAMBI = NoRef.CAMBI
+        WADIQAM = NoRef.WADIQAM
 
 
 class Smooth:
     @staticmethod
     def Savgol(polyorder: int = 3):
-        # FIX THIS YOU FUCKING RETARD
         def fun(data: list[int | float], window_length: int):
-            return savgol_filter(data, 10, polyorder)
+            if len(data) < polyorder:
+                raise ValueError("Your dataset is probably too small \U0001f602")
+            return savgol_filter(data, window_length, polyorder)
 
         fun.__name__ = 'Savitzky-Golay'
         return fun
@@ -224,7 +229,7 @@ class CSVPropThing:
             run_scenechange_detect(
                 clip=fallback(scenechange_clip, clip),
                 tonemap=False, output='scenechanges.txt',
-                detector=SceneChangeDetector.AvScenechange
+                detector=SceneChangeDetector.AvScenechange, av_sc_cli='av-scenechange.exe'
                 )
 
         data = clip_async_render(
@@ -342,12 +347,14 @@ def _prop_transfer(
 ) -> vs.VideoFrame:
     if clip.format.color_family == vs.YUV:
         postfix = ['_Y', '_Cb', '_Cr']
+    elif clip.format.color_family == vs.GRAY:
+        postfix = ['_Y']
     else:
         postfix = ['_R', '_G', '_B']
 
     props = {}
-    for i in range(3):
-        prop_value = f[i].props[f'{src_prop}']
+    for i in range(clip.format.num_planes):
+        prop_value = f[i] if type(f) is list else f.props[f'{src_prop}']
         props[f"{out_prop}{postfix[i]}"] = prop_value
 
     return clip.std.SetFrameProps(**props)
@@ -356,51 +363,54 @@ def _prop_transfer(
 def calc_diff(
     reference: vs.VideoNode,
     distorted: vs.VideoNode,
-    reduce: ReductionMode | None = ReductionMode.Fun(),
-    metric: Metric = Metric.FullRef.Complex.SSIM_MS,
+    reduce: ReductionMode | None = ReductionMode.Hybrid,
+    metric: Metric = Metric.FullRef.Complex.MDSI,
     matrix: MatrixT = Matrix.BT709,
+    transfer: Transfer | None = None,
+    dither: DitherType = DitherType.NONE,
     model_path: str = None,
+    rename_prop: bool = False,
+    planes: list[int] | int = [0, 1, 2],
     **args
 ) -> vs.VideoNode:
+    _ref = reference
+    _dis = distorted
+
+    if reduce:
+        if isinstance(reduce, ReductionMode.Crop):
+        
+            crop_left_right = int(reference.width * (reduce.percentage / 2) / 100)
+            crop_top_bottom = int(reference.height * (reduce.percentage / 2) / 100)
     
-    if isinstance(reduce, ReductionMode.Crop):
-
-        crop_left_right = int(reference.width * (reduce.percentage / 2) / 100)
-        crop_top_bottom = int(reference.height * (reduce.percentage / 2) / 100)
-
-        crop_left_right, crop_top_bottom = [
-            i + (4 - i % 4) % 4 for i in [crop_left_right, crop_top_bottom]
-        ]
-
-        reference, distorted = [
-            clip.std.Crop(
-                left=crop_left_right,
-                right=crop_left_right,
-                top=crop_top_bottom,
-                bottom=crop_top_bottom
-                ) for clip in (reference, distorted)
-        ]
-
-    elif isinstance(reduce, ReductionMode.Downsample):
-
-        new_width = reference.width - 2 * int(reference.width * (reduce.percentage / 2) / 100)
-        new_height = reference.height - 2 * int(reference.height * (reduce.percentage / 2) / 100)
-
-        new_width -= new_width % 4
-        new_height -= new_height % 4
-
-        reference, distorted = [
-            clip.resize.Spline64(new_width, new_height)
-            for clip in (reference, distorted)
-        ]
-
-    if isinstance(reduce, ReductionMode.Fun):
-
+            crop_left_right, crop_top_bottom = [
+                i + (4 - i % 4) % 4 for i in [crop_left_right, crop_top_bottom]
+            ]
+    
+            reference, distorted = [
+                clip.std.Crop(
+                    left=crop_left_right,
+                    right=crop_left_right,
+                    top=crop_top_bottom,
+                    bottom=crop_top_bottom
+                    ) for clip in (reference, distorted)
+            ]
+    
+        elif isinstance(reduce, ReductionMode.Downsample):
+        
+            new_width = reference.width - 2 * int(reference.width * (reduce.percentage / 2) / 100)
+            new_height = reference.height - 2 * int(reference.height * (reduce.percentage / 2) / 100)
+    
+            new_width -= new_width % 4
+            new_height -= new_height % 4
+    
+            reference, distorted = [
+                clip.resize.Spline64(new_width, new_height)
+                for clip in (reference, distorted)
+            ]
+    
         for clip in [reference, distorted]:
-
             crop_width = clip.width // 2
             crop_height = clip.height // 2
-
             clips = []
 
             corners = [
@@ -429,37 +439,54 @@ def calc_diff(
         Metric.FullRef.Complex.SSIM_MS,
         Metric.FullRef.Complex.GMSD
     ):
-        if reference.format.color_family != vs.YUV:
+        if reference.format.color_family not in (vs.GRAY, vs.YUV) or reference.format.bits_per_sample > 12:
             _reference, _distorted = [
-                core.resize.Spline64(i, format=vs.YUV420P12, matrix=matrix, dither_type='error_diffusion')
+                core.resize.Spline64(i, format=vs.YUV420P12, matrix_in=matrix, dither_type=dither)
                 for i in (reference, distorted)
             ]
         else:
             _reference, _distorted = reference, distorted
             
         if metric == Metric.FullRef.Complex.SSIM:
-            ssim = [SSIM(clip1=_reference, clip2=_distorted, plane=i) for i in range(3)]
-            measure = _reference.std.FrameEval(
-                prop_src=ssim, eval=partial(_prop_transfer, clip=reference, src_prop='PlaneSSIM', out_prop='SSIM'))
+            if not rename_prop:
+                measure = SSIM(clip1=_reference, clip2=_distorted, plane=planes if type(planes) is int else None)                
+            else:
+                measure = [SSIM(clip1=_reference, clip2=_distorted, plane=i) for i in range(reference.format.num_planes)]
+                measure = _reference.std.FrameEval(
+                    prop_src=measure, eval=partial(_prop_transfer, clip=reference, src_prop='PlaneSSIM', out_prop='SSIM'))
+                
 
         elif metric == Metric.FullRef.Complex.GMSD:
-            gmsd = [GMSD(clip1=_reference, clip2=_distorted, plane=i) for i in range(3)]
-            measure = _reference.std.FrameEval(
-                prop_src=gmsd, eval=partial(_prop_transfer, clip=_reference, src_prop='PlaneGMSD', out_prop='GMSD'))
+            if not rename_prop:
+                measure = GMSD(clip1=_reference, clip2=_distorted, plane=planes if type(planes) is int else None)
+            else:
+                measure = [GMSD(clip1=_reference, clip2=_distorted, plane=i) for i in range(reference.format.num_planes)]
+                measure = _reference.std.FrameEval(
+                    prop_src=measure, eval=partial(_prop_transfer, clip=_reference, src_prop='PlaneGMSD', out_prop='GMSD'))
         else:
+            if _reference.num_frames != _distorted.num_frames:
+                diff = abs(_reference.num_frames - _distorted.num_frames)
+
+                if _reference.num_frames < _distorted.num_frames:
+                    _reference += _reference.std.BlankClip(length=diff)
+                else:
+                    _distorted += _distorted.std.BlankClip(length=diff)
+
             measure = core.vmaf.Metric(reference=_reference, distorted=_distorted, feature=metric.value)
 
     elif metric in (
         Metric.FullRef.Complex.SSIMULACRA1,
         Metric.FullRef.Complex.SSIMULACRA2,
-        Metric.FullRef.Complex.BUTTER,
-        Metric.FullRef.Complex.WADIQAM
+        Metric.FullRef.Complex.BUTTERAUGLI,
+        Metric.FullRef.Complex.WADIQAM,
+        Metric.FullRef.Complex.MDSI
     ):
-
         if reference.format.color_family != vs.RGB:
             _reference, _distorted = [
-                core.resize.Spline64(i, format=vs.RGB48, matrix_in=matrix, dither_type='error_diffusion')
-                for i in (reference, distorted)
+                core.resize.Spline64(
+                    i, format=vs.RGB48, matrix_in=matrix, dither_type=dither,
+                    transfer_in=transfer, transfer=Transfer.LINEAR
+                ) for i in (reference, distorted)
             ]
         else:
             _reference, _distorted = reference, distorted
@@ -470,7 +497,7 @@ def calc_diff(
         elif metric == Metric.FullRef.Complex.SSIMULACRA2:
             measure = core.julek.SSIMULACRA(reference=_reference, distorted=_distorted, feature=0, **args)
             
-        elif metric == Metric.FullRef.Complex.BUTTER:
+        elif metric == Metric.FullRef.Complex.BUTTERAUGLI:
             measure = core.julek.Butteraugli(reference=_reference, distorted=_distorted, **args)
 
         elif metric == Metric.FullRef.Complex.WADIQAM:
@@ -484,8 +511,9 @@ def calc_diff(
 
             measure = wadiqam_fr(_reference, _distorted, model_folder_path=model_path, dataset='tid', top='patchwise', max_batch_size=2040)
 
-        measure = measure.std.SetFrameProp(prop='_Matrix', intval=matrix)
-
+        elif metric == Metric.FullRef.Complex.MDSI:
+            from muvsfunc import MDSI
+            measure = MDSI(clip1=_reference, clip2=_distorted, **args)
 
     elif metric in Metric.FullRef.Simple:
 
@@ -507,13 +535,45 @@ def calc_diff(
         key, prop = enum_map[metric]
         if key in _metrics:
             _metrics[key] = True    
-        
-            simple = [PlaneCompare(clip1=reference, clip2=distorted, plane=i, **_metrics) for i in range(3)]
-            measure = reference.std.FrameEval(
-                prop_src=simple, eval=partial(_prop_transfer, clip=reference, src_prop=f'{prop}', out_prop=f'{prop[5:]}'))
+
+            if not rename_prop:
+                measure = PlaneCompare(clip1=reference, clip2=distorted, plane=planes if type(planes) is int else None, **_metrics)
+            else:
+                measure = [PlaneCompare(clip1=reference, clip2=distorted, plane=i, **_metrics) for i in range(3)]
+                measure = reference.std.FrameEval(
+                    prop_src=measure, eval=partial(_prop_transfer, clip=reference, src_prop=f'{prop}', out_prop=f'{prop[5:]}'))
 
     else:
         measure = core.std.PlaneStats(reference, distorted, **args)
 
-    print(f'internal res: {measure.width, measure.height}')
-    return merge_clip_props(reference, measure)
+    merge = merge_clip_props(_dis, measure)
+
+    if reference.format.color_family is vs.YUV:
+        return merge.std.SetFrameProps(
+            _Matrix=Matrix.from_video(reference),
+            _Transfer=Transfer.from_video(reference),
+            _ColorRange=ColorRange.from_video(reference)
+            )
+
+    return merge    
+
+
+def benchmark(
+    function: VSFunction,
+    passes: int = 3,
+    threads: int = 1,
+    length: int = 50,
+) -> None:
+    core.num_threads = threads
+
+    clip = core.std.BlankClip(None, 3840, 2160, format=vs.YUV444PS, length=1, keep=True).std.Loop(length)
+    
+    clip_async_render(function(clip), None, "warmup")
+    
+    for i in range(passes):
+        clip_async_render(function(clip), None, str(i))
+
+        # read data
+        # average between runs
+        # print stats
+    pass
