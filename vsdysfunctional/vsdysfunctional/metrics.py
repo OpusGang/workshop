@@ -1,5 +1,4 @@
 import os
-from weakref import ref
 import requests
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,18 +20,18 @@ from scipy.signal import savgol_filter
 from scipy.stats import hmean, pmean
 from statistics import geometric_mean, mean, median
 
-
 class ReductionMode:
     class Crop:
-        def __init__(self, percentage):
+        def __init__(self, percentage: int = 25):
             self.percentage = percentage
             
     class Downsample:
-        def __init__(self, percentage):
+        def __init__(self, percentage: int = 50):
             self.percentage = percentage
 
     class Hybrid:
-        pass
+        def __init__(self, chunks: int = 4):  # Default to 4 chunks
+            self.chunks = chunks
 
 
 class ColourSpace(Enum):
@@ -363,7 +362,7 @@ def _prop_transfer(
 def calc_diff(
     reference: vs.VideoNode,
     distorted: vs.VideoNode,
-    reduce: ReductionMode | None = ReductionMode.Hybrid,
+    reduce: ReductionMode | None = ReductionMode.Hybrid(chunks=4),
     metric: Metric = Metric.FullRef.Complex.MDSI,
     matrix: MatrixT = Matrix.BT709,
     transfer: Transfer | None = None,
@@ -373,7 +372,6 @@ def calc_diff(
     planes: list[int] | int = [0, 1, 2],
     **args
 ) -> vs.VideoNode:
-    _ref = reference
     _dis = distorted
 
     if reduce:
@@ -407,30 +405,35 @@ def calc_diff(
                 clip.resize.Spline64(new_width, new_height)
                 for clip in (reference, distorted)
             ]
-    
-        for clip in [reference, distorted]:
-            crop_width = clip.width // 2
-            crop_height = clip.height // 2
-            clips = []
 
-            corners = [
-                (0, crop_width, 0, crop_height),  # top left
-                (crop_width, 0, 0, crop_height),  # top right
-                (crop_width, 0, crop_height, 0),  # bottom right
-                (0, crop_width, crop_height, 0)   # bottom left
-            ]
+        elif isinstance(reduce, ReductionMode.Hybrid):
+            chunks = reduce.chunks
 
-            for corner in corners:
-                cropped_clip = clip[::4].std.Crop(
-                    left=corner[0], right=corner[1],
-                    top=corner[2], bottom=corner[3]
-                )
-                clips.append(cropped_clip)
+            chunk_width = reference.width // chunks
+            chunk_height = reference.height // chunks
+            
+            if chunk_width < 320 or chunk_height < 180:
+                raise ValueError(f"{chunks} chunks ({chunk_width}x{chunk_height}) is probably too many for {reference.width}x{reference.height}")
+        
+            ref_clips = []
+            dis_clips = []
+        
+            for y in range(0, reference.height, chunk_height):
+                for x in range(0, reference.width, chunk_width):
 
-            if clip is reference:
-                reference = core.std.Interleave(clips)
-            else:
-                distorted = core.std.Interleave(clips)
+                    right_ref = max(0, reference.width - x - chunk_width)
+                    bottom_ref = max(0, reference.height - y - chunk_height)
+                    right_dis = max(0, distorted.width - x - chunk_width)
+                    bottom_dis = max(0, distorted.height - y - chunk_height)
+
+                    ref_cropped_clip = reference[::chunks].std.Crop(left=x, top=y, right=right_ref, bottom=bottom_ref)
+                    dis_cropped_clip = distorted[::chunks].std.Crop(left=x, top=y, right=right_dis, bottom=bottom_dis)
+
+                    ref_clips.append(ref_cropped_clip)
+                    dis_clips.append(dis_cropped_clip)
+        
+            reference = core.std.Interleave(ref_clips)
+            distorted = core.std.Interleave(dis_clips)
 
     if metric in (
         Metric.FullRef.Complex.PSNR,
